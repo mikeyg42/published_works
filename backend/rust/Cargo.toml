@@ -1,0 +1,15 @@
+[package]
+name = "rust_maze_solver"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rust_maze_solver"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+pyo3 = { version = "0.23.4", features = ["extension-module", "auto-initialize", "serde"] }
+serde = { version = "1.0", features = ["derive"] }
+pyo3-serde = "0.3"
+rayon = "1.8"

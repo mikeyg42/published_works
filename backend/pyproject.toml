@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Maze solving backend service"
+requires-python = ">=3.8"
+
+dependencies = [
+    "fastapi",
+    "networkx",
+    "matplotlib",
+    "rust_maze_solver @ file://rust"
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "rust_maze_solver"

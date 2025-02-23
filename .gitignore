@@ -1,0 +1,14 @@
+# Rust build artifacts
+/target
+Cargo.lock
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# VSCode or other IDE settings
+.vscode/
+
+# macOS files
+.DS_Store
