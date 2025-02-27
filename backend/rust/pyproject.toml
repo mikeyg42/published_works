@@ -11,8 +11,15 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
+dependencies = [
+    "fastapi",
+    "networkx == 3.4.2",
+    "matplotlib",
+    "joblib",
+]
+
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-module-name = "rust_maze_solver"
+module-name = "maze_solver"
 binding = "pyo3"
