@@ -1,0 +1,170 @@
+// ./src/styles.scss
+@import "bootstrap/scss/functions";
+@import "bootstrap/scss/variables";
+@import "bootstrap/scss/mixins";
+
+// Override Bootstrap variables here
+$navbar-padding-y: 1rem;  // Increase vertical padding
+$navbar-brand-font-size: 1.5rem;  // Increase brand font size
+$navbar-brand-margin-end: 1.5rem; // Add margin to separate brand from nav items
+
+// Import Bootstrap's main SCSS file
+@import "bootstrap/scss/bootstrap";
+
+:root {
+    /* Background Colors */
+    --background-dark:#302305;
+    --background-light:	#dcfcff;//or 
+    --background-dark2: #e693a3;
+    --bio-box-background:  #ffa2b6; // or 
+    --bio-box-alt: #EEFFFB;
+    --card-color: #f4CA67;// #efb11d;
+    --card-hover: #ffecc0; //
+    --side-bar-color: #6790f4; // or 
+  
+     /* accent colors */
+    --accent:	#e43d12; // or 
+    --accent-alt: #c51b3c;
+    --accent2:	#ebe9e1; // or 
+    --accent2-alt:#ff998f;
+    --accent3: #A2FFEB; // or 
+    --acccent3-alt: #68F5FD;
+    --accent-hover:#45A29e;
+  
+    /* Text Colors */ 
+    --text-dark: #191919;
+    --text-light:	#fff3d0;
+    --text-color-accent: #D6536d;//#1D5BEF;
+  
+    /* Social Media Colors */
+    --github-color: #1f1c1c;
+    --github-hover: #675d5d;
+    --linkedin-color: #0077b5;
+    --linkedin-hover: #A2FEEA;
+    --download-button-color:#643b9f;
+    
+   /* Grid and Layout Variables */
+   --sidebar-width: 550px;       /* Sidebar width */
+   --sidebar-min-width: 520px;
+   --outer-padding: 35px;        /* Padding around the grid */
+   --grid-gap: 15px;             /* Gap between grid items */
+   --min-column-width: 500px;    /* Minimum width for each grid item */
+   --footer-height:150px
+  
+   --cyan-neon:0 0 5px rgba(255, 255, 255, 0.9),
+   0 0 10px rgba(0, 255, 255, 0.8),
+   0 0 20px rgba(0, 255, 255, 0.7),
+   0 0 30px rgba(0, 255, 255, 0.6),
+   0 0 40px rgba(0, 255, 255, 0.5),
+   0 0 50px rgba(0, 255, 255, 0.4),
+   0 0 75px rgba(0, 255, 255, 0.3),
+   inset 0 0 10px rgba(255, 255, 255, 0.9);
+
+   --cyan-hover:0 0 10px rgba(255, 255, 255, 1),
+   0 0 20px rgba(0, 255, 255, 1),
+   0 0 30px rgba(0, 255, 255, 1),
+   0 0 40px rgba(0, 255, 255, 1),
+   0 0 50px rgba(0, 255, 255, 1),
+   0 0 75px rgba(0, 255, 255, 1),
+   inset 0 0 20px rgba(255, 255, 255, 1);
+  }
+
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    min-height: 100vh;
+    background: transparent;
+  }
+  
+/* --------------  GOOGLE FONTS ----------- */
+.manjari-regular {
+  font-family: Manjari, sans-serif;
+  font-weight: 400;
+  font-style: normal;
+}
+  
+  .rampart-one-regular {
+  font-family: Rampart One, sans-serif;
+  font-weight: 450;
+  font-style: normal;
+}
+  
+.audiowide-regular {
+  font-family: Audiowide, serif;
+  font-weight: 400;
+  font-style: normal;
+}
+
+
+/* ------------ Global Styling ------------- */
+
+.container-fluid {
+  font-family: Manjari, sans-serif;
+  color: var(--text-dark); 
+  overflow-x: hidden; 
+  overflow-y: auto;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;   
+  text-align: left;
+//   text-justify: inter-word;
+  background: transparent;
+}
+
+
+body {
+  background-color: #121212;
+  color: #e0e0e0;
+}
+
+.container {
+  max-width: 100%;
+  padding: 1rem;
+  margin: 0 auto;
+}
+
+.profile-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  margin: 2rem 0;
+}
+
+.profile-image {
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  margin-bottom: 1rem;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin: 1.5rem 0;
+}
+
+.expandable-text {
+  position: relative;
+  max-height: 100px;
+  overflow: hidden;
+  transition: max-height 0.3s ease-out;
+  cursor: pointer;
+}
+
+.expandable-text.expanded {
+  max-height: 1000px;
+}
+
+.grid-section {
+  margin: 2rem 0;
+}
+
+/* Remove any backdrop filter or overlay effects from the maze */
+.maze-container {
+  backdrop-filter: none;
+  background: none;
+}
+

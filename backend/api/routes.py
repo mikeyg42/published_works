@@ -1,15 +1,27 @@
-from fastapi import APIRouter, WebSocket
+# backend/api/routes.py
+from fastapi import APIRouter
 from backend.models import LargeMazeData, SolutionResponse, ErrorResponse
 from backend.solver.maze_solver import MazeSolver
+import json
 
-router = APIRouter()
+router = APIRouter(prefix="/api")
+
+# Create a single solver instance
 solver = MazeSolver()
 
 @router.post("/solve")
 async def solve_maze(data: LargeMazeData):
+    """REST API endpoint for solving mazes (non-WebSocket)"""
     try:
-        # Solutions are now processed by MazeSolver
-        solutions = await solver.solve_maze(data, websocket=None)
+        # Convert to JSON string for Rust
+        json_data = json.dumps(data.model_dump())
+        
+        # Process with Rust solver
+        solutions = solver.process_and_solve_maze(json_data)
+        
+        # Optional: Run verification in background without blocking response
+        # This could be done with background tasks if needed
+        
         return SolutionResponse(
             type="solution",
             data=solutions
@@ -22,27 +34,32 @@ async def solve_maze(data: LargeMazeData):
     except Exception as e:
         return ErrorResponse(
             type="internal_error",
-            error="An unexpected error occurred"
+            error=f"An unexpected error occurred: {str(e)}"
         ).model_dump()
 
-@router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    
-    try:
-        while True:
-            data = await websocket.receive_json()
-            maze_data = LargeMazeData(**data)
-            
-            # Solutions are now processed by MazeSolver
-            await solver.solve_maze(maze_data, websocket)
-    
-    except Exception as e:
-        await websocket.send_json(
-            ErrorResponse(
-                type="internal_error",
-                error=str(e)
-            ).model_dump()
-        )
-    finally:
-        await websocket.close()
+@router.get("/examples")
+async def get_example_mazes():
+    """Optional endpoint to provide example mazes for testing"""
+    return {
+        "examples": [
+            {
+                "name": "Small Test Maze",
+                "description": "A simple 3x3 maze for testing",
+                "data": {
+                    "largeComponents": [
+                        {
+                            "1": ["2", "4"],
+                            "2": ["1", "3", "5"],
+                            "3": ["2", "6"],
+                            "4": ["1", "5", "7"],
+                            "5": ["2", "4", "6", "8"],
+                            "6": ["3", "5", "9"],
+                            "7": ["4", "8"],
+                            "8": ["5", "7", "9"],
+                            "9": ["6", "8"]
+                        }
+                    ]
+                }
+            }
+        ]
+    }

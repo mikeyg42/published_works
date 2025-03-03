@@ -1,6 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from backend.api.routes import router  # Use absolute import
+from backend.api.routes import router
+from fastapi.websockets import WebSocket
+from backend.solver.maze_solver import MazeSolver
+import json
 
 app = FastAPI()
 
@@ -12,7 +15,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -25,3 +28,30 @@ app.include_router(router)
 async def health_check():
     """Simple health check endpoint."""
     return {"status": "healthy"}
+
+@app.websocket("/maze-solver")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    
+    try:  
+        # Get and parse the data
+        raw_data = await websocket.receive_text()
+        data = json.loads(raw_data)
+        
+        # Create solver instance
+        solver = MazeSolver()
+        
+        # Skip visualization for now
+        await solver.solve_maze(data, websocket)
+        
+    except Exception as e:
+        print(f"Error details: {type(e)}: {str(e)}")
+        await websocket.send_json({
+            "type": "internal_error",
+            "error": f"An unexpected error occurred: {str(e)}"
+        })
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass

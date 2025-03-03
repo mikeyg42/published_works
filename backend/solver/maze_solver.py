@@ -3,73 +3,71 @@ from typing import List, Dict
 from fastapi import WebSocket
 from maze_solver import process_and_solve_maze
 import matplotlib.pyplot as plt
-from joblib import Parallel, delayed
+#from joblib import Parallel, delayed -- removed for now for simplicity
 from datetime import datetime
-from backend.models import (
-    LargeMazeData,
-    SolutionResponse,
-    ErrorResponse
-)
+import json
+import asyncio
+import concurrent.futures
 
 class MazeSolver:
     def __init__(self):
         self._image_counter = 0
     
-    async def solve_maze(self, data: LargeMazeData, websocket: WebSocket):
+    async def solve_maze(self, data: dict, websocket: WebSocket = None):
         try:
-            if not data.largeComponents:
+            # Validate the input structure
+            if 'largeComponents' not in data:
+                raise ValueError("Missing 'largeComponents' in input data")
+            
+            if not data['largeComponents']:
                 raise ValueError("No maze components provided.")
             
-            # Process everything in Rust (single call)
-            solutions = process_and_solve_maze(data)
+            # Convert the data to JSON string before passing to Rust
+            json_data = json.dumps(data)
             
-            # Compute verification priority (sort components by size)
-            sorted_components = sorted(
-                enumerate(data.largeComponents), 
-                key=lambda x: len(x[1].adjacency_list),
-                reverse=True
-            )
+            # Run the Rust function in a separate thread with a timeout
+            # This prevents blocking the event loop with CPU-intensive work
+            loop = asyncio.get_running_loop()
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                try:
+                    # Execute the Rust function in a thread pool with a timeout
+                    solutions = await asyncio.wait_for(
+                        loop.run_in_executor(pool, lambda: process_and_solve_maze(json_data)),
+                        timeout=300  # 5 minute timeout
+                    )
+                except asyncio.TimeoutError:
+                    raise TimeoutError("The Rust solver took too long to respond")
             
-            # Identify the second largest component for longest path validation
-            second_largest_idx = sorted_components[1][0] if len(sorted_components) > 1 else -1
+            # Validate the result
+            if not isinstance(solutions, list):
+                raise ValueError(f"Expected list from Rust solver, got {type(solutions)}")
             
-            # Verify and visualize in parallel
-            results = Parallel(n_jobs=-1)(
-                delayed(self._verify_and_visualize)(
-                    component.adjacency_list, solutions[idx], idx, idx == second_largest_idx
-                )
-                for i, (idx, component) in enumerate(sorted_components)
-            )
+            print(f"Generated solution with {len(solutions)} paths")
             
-            # Log verification failures but do not stop execution
-            errors = []
-            for i, (errMsg, is_valid) in enumerate(results):
-                if not is_valid:
-                    errors.append(f"Solution {i} is invalid: {errMsg}")
+            # If websocket provided, send directly
+            if websocket:
+                try:
+                    await websocket.send_json(solutions)
+                    print(f"Successfully sent solution to client")
+                except Exception as ws_error:
+                    print(f"Error sending via websocket: {ws_error}")
+                    raise
+                
+            return solutions
             
-            # Send the complete solution
-            await websocket.send_json(
-                SolutionResponse(
-                    type="solution", 
-                    data=solutions
-                ).model_dump()
-            )
-            
-            # Send errors separately if any
-            if errors:
-                await websocket.send_json(
-                    ErrorResponse(
-                        type="validation_warning",
-                        error="; ".join(errors)
-                    ).model_dump()
-                )
         except Exception as e:
-            await websocket.send_json(
-                ErrorResponse(
-                    type="internal_error",
-                    error=f"An unexpected error occurred: {str(e)}"
-                ).model_dump()
-            )
+            error_message = f"An unexpected error occurred: {str(e)}"
+            print(f"Solver error: {error_message}")
+            if websocket:
+                try:
+                    await websocket.send_json({
+                        "type": "internal_error",
+                        "error": error_message
+                    })
+                except Exception as ws_close_error:
+                    print(f"Failed to send error message: {ws_close_error}")
+            raise
+
     
     def _verify_and_visualize(self, adjacency_dict: Dict[str, List[str]], 
                               path: List[str], component_idx: int, check_longest: bool) -> tuple[str, bool]:

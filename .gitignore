@@ -12,3 +12,12 @@ __pycache__/
 
 # macOS files
 .DS_Store
+
+venv/
+/venv/*
+
+node_modules/
+/node_modules/*
+
+dist/
+/dist/*

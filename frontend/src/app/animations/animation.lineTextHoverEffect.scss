@@ -1,0 +1,64 @@
+/* 
+  lineTextHoverAnimation.css
+  This stylesheet defines a subtle text hover effect.
+  - On hover, each letter (wrapped in a span) will shift upward slightly.
+  - A blinking “terminal cursor” appears at the end of the text.
+  - A semi-transparent, blurred backdrop is applied behind the text.
+*/
+
+/* Base container style: position relative for pseudo-element overlay */
+.line-hover {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+}
+
+/* Each character is wrapped in a span with the class 'char' */
+.line-hover span.char {
+  display: inline-block;
+  transition: transform 0.3s ease;
+}
+
+/* Cursor element styles */
+.line-hover .cursor {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background-color: currentColor;
+  animation: blink 1s infinite;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+/* Backdrop pseudo-element for a blurred background */
+.line-hover:hover::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* A translucent background helps the blur to show */
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(5px);
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* Hover effect: shift letters upward and reveal the cursor */
+.line-hover:hover span.char {
+  transform: translateY(-5px);
+}
+
+.line-hover:hover .cursor {
+  opacity: 1;
+}
+
+/* Simple blinking animation for the cursor */
+@keyframes blink {
+  0%   { opacity: 1; }
+  50%  { opacity: 0; }
+  100% { opacity: 1; }
+}
