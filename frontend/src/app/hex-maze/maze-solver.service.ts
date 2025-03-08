@@ -122,14 +122,6 @@ export class MazeSolverService {
   progress$ = this.progressSubject.asObservable();
 
   constructor(@Inject(PLATFORM_ID) private platformId: Object) {
-    if (isPlatformBrowser(this.platformId)) {
-      this.worker = new Worker(
-        new URL('./maze-worker.worker', import.meta.url)
-      );
-      if (this.worker) {
-        this.setupWorkerHandlers(this.worker);
-      }
-    }
   }
 
   async solveMaze(
@@ -162,15 +154,10 @@ export class MazeSolverService {
     // Find connected connComponents
     const connComponents = this.findConnectedConnComponents(graph, mazeData.pathMap.cells);
     
-    const { largeConnComponents, smallConnComponents } = this.analyzeConnComponents(connComponents, graph);
-        
-    // Create a pool of workers for local solving:
-    const workerCount = Math.min(4, navigator.hardwareConcurrency || 2);
-    const workerPool: Worker[] = [];
-    const busyWorkers = new Set<Worker>();
+    const allConnComponents = this.analyzeConnComponents(connComponents, graph).allConnComponents;
     
-    const remoteResults = largeConnComponents.length > 0 
-      ? await this.solveRemotely(largeConnComponents.map(comp => ({ adjacencyList: comp.adjacencyList })))
+    const remoteResults = allConnComponents?.length > 0
+      ? await this.solveRemotely(allConnComponents.map(comp => ({ adjacencyList: comp.adjacencyList })), mazeData.pathMap)
       : [];
 
     const componentIndexByNode = new Map<string, number>();
@@ -180,7 +167,7 @@ export class MazeSolverService {
       });
     });
 
-    const processedLargeComponents: ProcessedConnComponent[] = [];
+    const processedConnComponents: ProcessedConnComponent[] = [];
     // For each result path, find its component using the first node
     remoteResults.forEach(path => {
       if (path.length === 0) return;
@@ -189,6 +176,7 @@ export class MazeSolverService {
       const componentIndex = componentIndexByNode.get(firstNode);
       
       if (componentIndex === undefined) {
+        console.warn(`Component index not found for path: ${path}`);
         return;
       }
 
@@ -196,84 +184,12 @@ export class MazeSolverService {
       const procConnComponent = connComponents[componentIndex] as ProcessedConnComponent;
       procConnComponent.path = path as ProcessedConnComponent['path'];
       procConnComponent.pathLength = path.length as ProcessedConnComponent['pathLength'];
-      processedLargeComponents.push(procConnComponent);
+      processedConnComponents.push(procConnComponent);
     });
 
-    for (let i = 0; i < workerCount; i++) {
-      const worker = new Worker(new URL('./maze-worker.worker', import.meta.url));
-      this.setupWorkerHandlers(worker);
-      workerPool.push(worker);
-    }
-
-    const getAvailableWorker = async (): Promise<Worker> => {
-      const worker = workerPool.find(w => !busyWorkers.has(w));
-      if (worker) {
-        busyWorkers.add(worker);
-        return worker;
-      }
-      // Wait for a worker to become available
-      return new Promise(resolve => {
-        const interval = setInterval(() => {
-          const worker = workerPool.find(w => !busyWorkers.has(w));
-          if (worker) {
-            clearInterval(interval);
-            busyWorkers.add(worker);
-            resolve(worker);
-          }
-        }, 30);
-      });
-    };
-
-    let processedConnComponents: ProcessedConnComponent[] = [];
-    try {
-      // Launch local solvers in parallel:
-      const localPromises = await Promise.all(smallConnComponents.map(async connComponent => {
-        const worker = await getAvailableWorker();
-        const result = await this.solveLocally(connComponent.connComponent, connComponent.graph, worker);
-        busyWorkers.delete(worker);
-        return result;
-      }));
-
-     const localSmallResults = await Promise.all(localPromises);
-
-
-    processedConnComponents = [...localSmallResults, ...processedLargeComponents];
-      // Combine the results from both local and remote solvers:
-      
-    } catch (error) {
-      console.error('Error in solving:', error);
-      throw error;
-    } finally {
-      // Clean up workers
-      workerPool.forEach(worker => worker.terminate());
-    }
     if (processedConnComponents.length > 0) {
       this.animatePath(processedConnComponents, mazeData.pathMap);
     }
-  }
-
-
-  // Update worker handler setup to accept specific worker
-  private setupWorkerHandlers(worker: Worker) {
-    worker.onmessage = ({ data }: MessageEvent<WorkerMessage>) => {
-      switch (data.type) {
-        case 'progress':
-          if (data.data) {
-            this.progressSubject.next({
-              currentPath: data.data.currentPath,
-              totalPaths: data.data.totalPaths,
-              pathProgress: data.data.pathProgress,
-            });
-          }
-          break;
-        case 'debug':
-          console.debug('[Maze Worker]', data.message, ...(data.args || []));
-          break;
-        case 'error':
-          console.error('[Maze Worker Error]', data.error);
-          break;
-      }
-    };
   }
 
   private findConnectedConnComponents(graph: Graph, cells: PathCell[]): ConnComponent[] {
@@ -849,44 +765,49 @@ private findSharedVertices(
 
 // This function analyzes the connComponents in the pathMap and returns a list of large and small connComponents
   private analyzeConnComponents(connComponents: ConnComponent[], graph: Graph): { 
-    largeConnComponents: { connComponent: ConnComponent, size: number, adjacencyList: Record<string, string[]>, graph: Graph }[],
-    smallConnComponents: { connComponent: ConnComponent, size: number, adjacencyList: Record<string, string[]>, graph: Graph }[]
+    allConnComponents: { 
+      connComponent: ConnComponent, 
+      size: number, 
+      adjacencyList: Record<string, { 
+        neighbors: string[], 
+        position: { row: number, col: number } 
+      }>, 
+      graph: Graph 
+    }[],
   } {
-
-    const largeConnComponents: {  connComponent: ConnComponent, size: number, adjacencyList: Record<string, string[]>, graph: Graph }[] = [];
-    const smallConnComponents: {  connComponent: ConnComponent, size: number, adjacencyList: Record<string, string[]>, graph: Graph }[] = [];
+    const allConnComponents: any[] = [];
 
     connComponents.forEach(connComponent => {
+      if (connComponent.size < LARGE_COMPONENT_THRESHOLD) {
+        return;
+      }
       const subgraph = this.createSubgraph(connComponent.pixels.map(c => c.linearId.toString()), graph);
       
-      // Create adjacency list
-      const adjacencyList: Record<string, string[]> = {};
+      // Create enhanced adjacency list with position information
+      const adjacencyList: Record<string, { 
+        neighbors: string[], 
+        position: { row: number, col: number } 
+      }> = {};
 
-      subgraph.forEachNode((node) => {
-        adjacencyList[node] = subgraph.neighbors(node);
+      connComponent.pixels.forEach(pixel => {
+        adjacencyList[pixel.linearId.toString()] = {
+          neighbors: subgraph.neighbors(pixel.linearId.toString()),
+          position: {
+            row: pixel.position.row,
+            col: pixel.position.col
+          }
+        };
       });
     
-      if (connComponent.size > 2100) {
-        console.log('component is TOO LARGE, must abort:', connComponent.size);
-        return;
-      } else if (connComponent.size >= LARGE_COMPONENT_THRESHOLD) {
-        largeConnComponents.push({
+      allConnComponents.push({
           connComponent: connComponent,
           size: connComponent.size,
           adjacencyList: adjacencyList,
           graph: subgraph
-        });
-      } else {
-        smallConnComponents.push({
-          connComponent: connComponent,
-          size: connComponent.size,
-          adjacencyList,
-          graph: subgraph
-        });
-      }
+      });
     });
 
-    return { largeConnComponents, smallConnComponents };
+    return { allConnComponents };
   }
 
   private calculateBounds(xCoords: number[], yCoords: number[]): ConnComponent['bounds'] {
@@ -921,11 +842,24 @@ private findSharedVertices(
   }
 
 private async solveRemotely(
-  connComponents: { adjacencyList: Record<string, string[]> }[]
+  connComponents: { 
+    adjacencyList: Record<string, { 
+      neighbors: string[], 
+      position: { row: number, col: number } 
+    }> 
+  }[], pathMap: PathMap
 ): Promise<string[][]> {
-  // Format the adjacency lists as the Python backend expects
+  // Format the payload for the backend
   const payload = {
-    largeComponents: connComponents.map(comp => comp.adjacencyList)
+    largeComponents: connComponents.map(comp => {
+      // Convert enhanced adjacency list back to simple format expected by backend
+      const simpleAdjList: Record<string, string[]> = {};
+      Object.entries(comp.adjacencyList).forEach(([nodeId, data]) => {
+        simpleAdjList[nodeId] = data.neighbors;
+      });
+      return simpleAdjList;
+    }),
+    dimensions: pathMap.dimensions
   };
   
   const ws = new WebSocket(environment.websocketUrl);
@@ -1020,52 +954,6 @@ private async solveRemotely(
     };
   });
 }
-
-  private async solveLocally(
-    connComponent: ConnComponent,
-    graph: Graph,
-    worker: Worker
-  ): Promise<ProcessedConnComponent> {
-    // Prepare data for worker
-    const workerData: WorkerData = {
-      edges: graph.mapEdges((edge, attributes, source, target) => {
-        return { from: parseInt(source), to: parseInt(target) };
-      }),
-      cells: connComponent.pixels.map(cell => ({
-        id: cell.linearId,
-        position: {
-          x: cell.position.x,
-          y: cell.position.y,
-          row: cell.position.row,
-          col: cell.position.col
-        },
-        referenceVertex: {
-          x: cell.referenceVertex.x,
-          y: cell.referenceVertex.y
-        }
-      }))
-    };
-
-    // Send message to worker and wait for response
-    worker.postMessage(workerData);
-
-    return new Promise((resolve, reject) => {
-      const messageHandler = ({ data }: MessageEvent<WorkerMessage>) => {
-        if (data.type === 'result') {
-          worker.removeEventListener('message', messageHandler);
-          resolve({
-            ...connComponent,
-            pathLength: data.data.path.length,
-            path: data.data.path
-          });
-        } else if (data.type === 'error') {
-          worker.removeEventListener('message', messageHandler);
-          reject(new Error(data.error));
-        }
-      };
-      worker.addEventListener('message', messageHandler);
-    });
-  }
 }
 
 export type LchColor = Color & {

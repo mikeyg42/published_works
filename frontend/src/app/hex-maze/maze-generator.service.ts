@@ -71,10 +71,10 @@ enum Direction {
 export class MazeGeneratorService {
   constructor(@Inject(PLATFORM_ID) private platformId: Object) {}
 
-  private readonly MAX_HEXAGONS_PER_ROW = 70;
+  private readonly MAX_HEXAGONS_PER_ROW = 60;
   private readonly MIN_HEXAGONS_PER_ROW = 9;
   private readonly MAX_RADIUS = 75;
-  private readonly MIN_HEXAGON_WIDTH = 7;
+  private readonly MIN_HEXAGON_WIDTH = 13;
   private readonly PADDING_RATIO = 3; // Padding will be this ratio of hexSize
   
   private ctx: CanvasRenderingContext2D | null = null;

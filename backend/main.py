@@ -38,12 +38,22 @@ async def websocket_endpoint(websocket: WebSocket):
         raw_data = await websocket.receive_text()
         data = json.loads(raw_data)
         
+        # Log the dimensions if present
+        if 'dimensions' in data:
+            print(f"Received maze dimensions: {data['dimensions']}")
+        
         # Create solver instance
         solver = MazeSolver()
         
         # Skip visualization for now
         await solver.solve_maze(data, websocket)
         
+    except json.JSONDecodeError as e:
+        print(f"JSON parsing error: {str(e)}")
+        await websocket.send_json({
+            "type": "internal_error",
+            "error": f"Invalid JSON format: {str(e)}"
+        })
     except Exception as e:
         print(f"Error details: {type(e)}: {str(e)}")
         await websocket.send_json({

@@ -1,0 +1,3 @@
+[submodule "/Users/mikeglendinning/projects/maze_solver_app/frontend/hex-grid"]
+	path = /Users/mikeglendinning/projects/maze_solver_app/frontend/hex-grid
+	url = https://github.com/mikeyg42/hex-grid.git
