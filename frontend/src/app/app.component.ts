@@ -43,7 +43,7 @@ import { NgOptimizedImage } from '@angular/common';
 import { BoldNamePipe } from './bold-name.pipe';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { ModalComponent } from './modal/modal.component';
-import { HexMazeComponent } from './hex-maze/hex-maze.component';
+import { HexMazeComponent } from './hex-maze/components/hex-maze.component';
 import { Meta, Title } from '@angular/platform-browser';
 import ApplyLineTextHoverAnimation from './animations/animation.lineTextHoverEffect';
 

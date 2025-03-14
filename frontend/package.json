@@ -8,7 +8,7 @@
     "watch": "ng build --watch --configuration development",
     "test": "ng test",
     "serve:ssr:maze-solver-frontend": "node dist/maze-solver-frontend/server/server.mjs",
-    "start:prod": "NODE_ENV=production node dist/main.server.js"
+    "start:prod": "NODE_ENV=production node dist/maze-solver-frontend/server/main.js"
   },
   "private": true,
   "dependencies": {
@@ -26,10 +26,12 @@
     "@angular/router": "^19.2.0",
     "@angular/ssr": "^19.2.0",
     "@nx/angular": "^20.1.4",
+    "@types/three": "^0.174.0",
     "culori": "^4.0.1",
     "express": "^4.21.1",
     "graphology": "^0.26.0",
     "rxjs": "~7.8.2",
+    "three": "^0.174.0",
     "tslib": "^2.8.1",
     "typescript": "~5.7.3"
   },
