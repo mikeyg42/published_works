@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "maze_solver_app"
 version = "0.1.0"
 description = "Maze solver application"
-requires-python = ">=3.8"
+requires-python = "==3.12.10"
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
@@ -14,7 +14,9 @@ dependencies = [
     "pydantic",
     "networkx",
     "matplotlib",
-    "rust_maze_solver"
+    "rust_maze_solver",
+    "ortools",
+    "google-cloud-storage>=2.0.0"
 ]
 
 [tool.setuptools]

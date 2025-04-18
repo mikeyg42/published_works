@@ -46,6 +46,8 @@ import { ModalComponent } from './modal/modal.component';
 import { HexMazeComponent } from './hex-maze/components/hex-maze.component';
 import { Meta, Title } from '@angular/platform-browser';
 import ApplyLineTextHoverAnimation from './animations/animation.lineTextHoverEffect';
+import { VonGridService } from './hex-maze/services/von-grid.service';
+
 
 @Component({
   selector: 'app-root',
@@ -55,12 +57,12 @@ import ApplyLineTextHoverAnimation from './animations/animation.lineTextHoverEff
   encapsulation: ViewEncapsulation.None,
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [
-    HexMazeComponent,
     CommonModule,
     RouterModule,
     NgOptimizedImage,
     BoldNamePipe,
-    ModalComponent
+    ModalComponent,
+    HexMazeComponent
   ]
 })
 export class AppComponent implements OnInit, OnDestroy, AfterViewInit {
@@ -85,6 +87,22 @@ export class AppComponent implements OnInit, OnDestroy, AfterViewInit {
   
   private resizeTimeout: number | null = null;
   private sr: any;
+
+  bioFullText = `
+      <p>
+          I graduated from Columbia University in 2017 with a BA in Neuroscience and Behavior in 2017. In my final years at Columbia, I served as a research assistant in an<a href="https://woolleylab.com/" target="_blank" rel="noopener noreferrer"> exceptional neuroscience lab</a> studying vocal learning in songbirds. There, I learned to code in MATLAB and began approaching problems with a computer engineering mindset. This experience introduced me to "big data," machine learning, and signal processing.
+      </p>
+      <p>
+          After graduation, I spent the subsequent 6+ years continuing to do life sciences research in prestigious academic labs, first at
+          <a href="https://gradschool.weill.cornell.edu/faculty/heidi-stuhlmann" target="_blank" rel="noopener noreferrer">Weill Cornell Medical College</a>
+          and later at
+          <a href="https://www.neurology.columbia.edu/research/research-labs/agalliu-lab" target="_blank" rel="noopener noreferrer">Columbia University/NewYork-Presbyterian Hospital</a>.
+          I collaborated closely with dozens of scientists and clinicians at the forefront of their disciplines, who trained me to become a discerning and meticulous researcher.
+      </p>
+      <p>
+        <em>I have demonstrated the ability to advance our understanding of a numerous different complex systems, spanning a wide gamut of methods.</em> These published works embody my commitment to continual learning and provide a glimpse into the nature and scope of the research that has occupied my career up until now. I hope they convey the <em>passion and dedication</em> that drive my work.
+      </p>
+  `;
 
   articles: Publication[] = [
     {
@@ -356,24 +374,9 @@ export class AppComponent implements OnInit, OnDestroy, AfterViewInit {
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
       { name: 'robots', content: 'index, follow' }
     ]);
-    this.bioText = this.sanitizer.bypassSecurityTrustHtml(`
-      <p>
-          I graduated from Columbia University in 2017 with a BA in Neuroscience and Behavior in 2017. In my final years at Columbia, I served as a research assistant in an<a href="https://woolleylab.com/" target="_blank" rel="noopener noreferrer"> exceptional neuroscience lab</a> studying vocal learning in songbirds. There, I learned to code in MATLAB and began approaching problems with a computer engineering mindset. This experience introduced me to "big data," machine learning, and signal processing.
-
-
-      </p>
-      <p>
-          After graduation, I spent the subsequent 6+ years continuing to do life sciences research in prestigious academic labs, first at
-          <a href="https://gradschool.weill.cornell.edu/faculty/heidi-stuhlmann" target="_blank" rel="noopener noreferrer">Weill Cornell Medical College</a>
-          and later at
-          <a href="https://www.neurology.columbia.edu/research/research-labs/agalliu-lab" target="_blank" rel="noopener noreferrer">Columbia University/NewYork-Presbyterian Hospital</a>.
-          I collaborated closely with dozens of scientists and clinicians at the forefront of their disciplines, who trained me to become a discerning and meticulous researcher.
-
-      </p>
-      <p>
-        <em>I have demonstrated the ability to advance our understanding of a numerous different complex systems, spanning a wide gamut of methods.</em> These published works embody my commitment to continual learning and provide a glimpse into the nature and scope of the research that has occupied my career up until now. I hope they convey the <em>passion and dedication<</em> that drive my work.
-      </p>
-    `); 
+    
+    // Sanitize the HTML in the bio text
+    this.bioText = this.sanitizer.bypassSecurityTrustHtml(this.bioFullText);
   }
 
   async ngOnInit(): Promise<void> {
@@ -381,6 +384,7 @@ export class AppComponent implements OnInit, OnDestroy, AfterViewInit {
       this.getCSSVariables();
       this.adjustGrid();
     }
+  
   }
 
   ngOnDestroy(): void {

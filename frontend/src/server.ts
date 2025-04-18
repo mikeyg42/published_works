@@ -1,44 +1,75 @@
-import { APP_BASE_HREF } from '@angular/common';
-import { CommonEngine } from '@angular/ssr/node';
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
+import helmet from 'helmet';
+import cors from 'cors';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import bootstrap from './main.server';
+import crypto from 'crypto';
 
-// The Express app is exported so that it can be used by serverless Functions.
 export function app(): express.Express {
   const server = express();
-  const serverDistFolder = dirname(fileURLToPath(import.meta.url));
-  const browserDistFolder = resolve(serverDistFolder, '../browser');
-  const indexHtml = join(serverDistFolder, 'index.server.html');
 
-  const commonEngine = new CommonEngine();
-
-  server.set('view engine', 'html');
-  server.set('views', browserDistFolder);
-
-  // Example Express Rest API endpoints
-  // server.get('/api/**', (req, res) => { });
-  // Serve static files from /browser
-  server.get('**', express.static(browserDistFolder, {
-    maxAge: '1y',
-    index: 'index.html',
+  server.use(cors({
+    origin: ["https://michaelglendinning.com"],
+    methods: ['GET', 'POST', 'OPTIONS'],
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization']
   }));
 
-  // All regular routes use the Angular engine
-  server.get('**', (req, res, next) => {
-    const { protocol, originalUrl, baseUrl, headers } = req;
+  // Middleware to generate a nonce per request and store it in res.locals
+  server.use((req: Request, res: Response, next: NextFunction) => {
+    res.locals['cspNonce'] = crypto.randomBytes(32).toString("hex");
+    next();
+  });
 
-    commonEngine
-      .render({
-        bootstrap,
-        documentFilePath: indexHtml,
-        url: `${protocol}://${headers.host}${originalUrl}`,
-        publicPath: browserDistFolder,
-        providers: [{ provide: APP_BASE_HREF, useValue: baseUrl }],
-      })
-      .then((html: string) => res.send(html))
-      .catch((err: any) => next(err));
+  // Configure Helmet with a relaxed CSP.
+  server.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: [
+            "'self'","'unsafe-inline'", "'unsafe-eval'",
+            (req, res) => `'nonce-${(res as Response).locals['cspNonce']}'`
+          ],
+          styleSrc: [
+            "'self'",
+            "'unsafe-inline'",
+            "https://fonts.googleapis.com",
+            "https://cdn.jsdelivr.net",
+
+            (req, res) => `'nonce-${(res as Response).locals['cspNonce']}'`
+          ],
+          fontSrc: [
+            "'self'",
+            "https://fonts.gstatic.com",
+            "https://cdn.jsdelivr.net",
+            "https://maxcdn.bootstrapcdn.com"
+          ],
+          imgSrc: ["'self'", "data:", "https:"],
+          connectSrc: ["'self'", "https:"]
+        }
+      }
+    })
+  );
+  
+  let serverDistFolder: string;
+  
+  // Check for ESM vs CommonJS environment
+  if (typeof __dirname === 'undefined') {
+    // ESM
+    const modulePath = fileURLToPath(import.meta.url);
+    serverDistFolder = dirname(modulePath);
+  } else {
+    // CommonJS
+    serverDistFolder = __dirname;
+  }
+  
+  const browserDistFolder = resolve(serverDistFolder, '../browser');
+
+  server.use(express.static(browserDistFolder, { maxAge: '1y' }));
+
+  server.get('*', (req: Request, res: Response) => {
+    res.sendFile(join(browserDistFolder, 'index.html'));
   });
 
   return server;
@@ -46,11 +77,9 @@ export function app(): express.Express {
 
 function run(): void {
   const port = process.env['PORT'] || 4000;
-
-  // Start up the Node server
   const server = app();
   server.listen(port, () => {
-    console.log(`Node Express server listening on http://localhost:${port}`);
+    console.log(`Node Express server listening on port ${port}`);
   });
 }
 

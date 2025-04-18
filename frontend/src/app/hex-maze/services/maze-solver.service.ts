@@ -1,8 +1,5 @@
-/// <reference lib="webworker" />
 // maze-solver.service.ts
 import { Injectable, Inject, PLATFORM_ID } from '@angular/core';
-import { isPlatformBrowser } from '@angular/common';
-import { MazeData } from './maze-api.service';
 import { BehaviorSubject } from 'rxjs';
 import { PathCell, PathMap } from './maze-generator.service';
 import Graph from 'graphology';
@@ -24,14 +21,6 @@ interface ConnComponent {
     minY: number;
     maxY: number;
   };
-}
-
-interface WorkerMessage {
-  type: 'progress' | 'debug' | 'error' | 'result';
-  data?: any;
-  message?: string;
-  args?: any[];
-  error?: string;
 }
 
 export interface ProcessedConnComponent extends ConnComponent {
@@ -60,38 +49,6 @@ interface ConnComponentCell {
     y: number;
   };
 }
-/*
-interface PathCell {
-  position: {
-    row: number;
-    col: number;
-    x: number;    // center x
-    y: number;    // center y
-  };
-  linearId: number;
-  openPaths: number[];
-
-  referenceVertex: {
-    x: number;
-    y: number;
-  };
-}*/
-
-const BASE_COLORS = ['#0a1929', '#0d47a1', '#00acc1', '#b2ebf2'];
-
-interface HexCell {
-  id: number;
-  position: {
-    x: number;
-    y: number;
-    row: number;
-    col: number;
-  };
-  referenceVertex: {
-    x: number;
-    y: number;
-  };
-}
 
 const COMPONENT_SIZE_THRESHOLD = 8
 
@@ -113,32 +70,28 @@ export class MazeSolverService {
   }
 
   async solveMaze(
-    mazeData: MazeData
+    pathMap: PathMap
   ): Promise<ProcessedConnComponent[]> {
-    if (!isPlatformBrowser(this.platformId)) {
-      console.warn('Maze solving is not available during server-side rendering');
-      return [];
-    }
-    
+
     // Find connected connComponents once
     const graph = new Graph({ type: 'undirected', multi: false});
           // Add nodes 
-    mazeData.pathMap.cells.forEach(cell => {
+    pathMap.cells.forEach(cell => {
       graph.addNode(cell.linearId.toString());
     });
       
     // Add edges
-    mazeData.pathMap.edges.forEach(edge => {
+    pathMap.edges.forEach(edge => {
       graph.addEdge(edge.from.toString(), edge.to.toString());
     });
 
     // Find connected connComponents
-    const connComponents = this.findConnectedConnComponents(graph, mazeData.pathMap.cells);
+    const connComponents = this.findConnectedConnComponents(graph, pathMap.cells);
     
     const allConnComponents = this.analyzeConnComponents(connComponents, graph).allConnComponents;
     
     const remoteResults = allConnComponents?.length > 0
-      ? await this.solveRemotely(allConnComponents.map(comp => ({ adjacencyList: comp.adjacencyList })), mazeData.pathMap)
+      ? await this.solveRemotely(allConnComponents.map(comp => ({ adjacencyList: comp.adjacencyList })), pathMap)
       : [];
 
     const processedConnComponents: ProcessedConnComponent[] = [];
@@ -359,7 +312,7 @@ private async solveRemotely(
   }[], pathMap: PathMap
 ): Promise<string[][]> {
   // Format the payload for the backend
-  const payload = {
+  const payload = JSON.stringify({
     largeComponents: connComponents.map(comp => {
       // Convert enhanced adjacency list back to simple format expected by backend
       const simpleAdjList: Record<string, string[]> = {};
@@ -369,28 +322,55 @@ private async solveRemotely(
       return simpleAdjList;
     }),
     dimensions: pathMap.dimensions
-  };
+  });
   
+  console.log('Attempting to connect to WebSocket at:', environment.websocketUrl);
+  console.log('Current origin:', window.location.origin);
+  console.log('Protocol:', window.location.protocol);
   const ws = new WebSocket(environment.websocketUrl);
 
   return new Promise((resolve, reject) => {
     let timeout: NodeJS.Timeout;
+    let taskId: string | null = null;
+    
+    let connectionAttempted = false;
+    let connectionTimeoutId: NodeJS.Timeout;
+
+    // Set a timeout for the initial connection attempt
+    connectionTimeoutId = setTimeout(() => {
+      if (!connectionAttempted) {
+        console.error('WebSocket connection attempt timed out after 5 seconds');
+        console.error('No connection events were triggered');
+        console.error('WebSocket URL:', environment.websocketUrl);
+        console.error('Current origin:', window.location.origin);
+        console.error('Protocol:', window.location.protocol);
+        ws.close();
+        reject(new Error('WebSocket connection attempt timed out after 5 seconds'));
+      }
+    }, 5000);
 
     ws.onopen = () => {
-      console.debug('WebSocket connected');
-      console.debug('Payload structure:', {
-        fullPayload: payload,
-        type: typeof payload,
-        largeComponentsType: typeof payload.largeComponents,
-        firstComponent: payload.largeComponents[0]
-      });
+      connectionAttempted = true;
+      clearTimeout(connectionTimeoutId);
+      console.log('WebSocket connected successfully');
+      console.log('Sending payload to server...');
       
       timeout = setTimeout(() => {
+        console.error('WebSocket operation timed out after 30 seconds');
+        console.error('No response received from server');
         ws.close();
-        reject(new Error('WebSocket operation timed out'));
-      }, 30000); // 6 seconds
+        reject(new Error('WebSocket operation timed out after 30 seconds'));
+      }, 30000); // 30 seconds timeout
 
-      ws.send(JSON.stringify(payload));
+      try {
+        ws.send(JSON.stringify(payload));
+        console.log('Payload sent successfully');
+      } catch (err) {
+        console.error('Error sending payload:', err);
+        clearTimeout(timeout);
+        ws.close();
+        reject(err);
+      }
     };
 
     ws.onmessage = (event) => {
@@ -412,33 +392,54 @@ private async solveRemotely(
           throw new Error(`Server error: ${data.error}`);
         }
         
-        // Validate that we received an array
-        if (!Array.isArray(data)) {
-          console.error('Received non-array data:', data);
-          throw new Error(`Expected array of paths from server, got ${typeof data}`);
+        // Handle queue status message
+        if (typeof data === 'object' && data !== null && 'type' in data && data.type === 'queued') {
+          console.log(`Task queued - ID: ${data.task_id}, Position: ${data.position}`);
+          taskId = data.task_id;
+          // Continue waiting for the actual result
+          return;
         }
         
-        // Validate each path is an array
-        const paths: string[][] = data.filter((path, index) => {
-          if (!Array.isArray(path)) {
-            console.warn(`Path at index ${index} is not an array:`, path);
-            return false;
+        // Handle results message
+        if (typeof data === 'object' && data !== null && 'type' in data && data.type === 'results' && 'paths' in data) {
+          // Extract paths from results object
+          if (Array.isArray(data.paths)) {
+            clearTimeout(timeout);
+            ws.close();
+            resolve(data.paths);
+            return;
           }
-          return true;
-        });
-        
-        if (paths.length !== data.length) {
-          console.warn(`Filtered out ${data.length - paths.length} invalid paths`);
+          throw new Error(`Invalid paths data in results: ${typeof data.paths}`);
         }
         
-        if (paths.length === 0) {
-          console.warn('No valid paths found in response');
+        // If we receive an array directly (old server format), use it
+        if (Array.isArray(data)) {
+          // Validate each path is an array
+          const paths: string[][] = data.filter((path, index) => {
+            if (!Array.isArray(path)) {
+              console.warn(`Path at index ${index} is not an array:`, path);
+              return false;
+            }
+            return true;
+          });
+          
+          if (paths.length !== data.length) {
+            console.warn(`Filtered out ${data.length - paths.length} invalid paths`);
+          }
+          
+          if (paths.length === 0) {
+            console.warn('No valid paths found in response');
+          }
+          
+          clearTimeout(timeout);
+          ws.close();
+          
+          resolve(paths);
+          return;
         }
         
-        clearTimeout(timeout);
-        ws.close();
-        
-        resolve(paths);
+        console.error('Received unexpected data format:', data);
+        throw new Error(`Unexpected response format: ${typeof data}`);
       } catch (error) {
         console.error('Error processing WebSocket message:', error);
         clearTimeout(timeout);
@@ -449,16 +450,24 @@ private async solveRemotely(
     
     ws.onerror = (error) => {
       console.error('WebSocket error:', error);
-      clearTimeout(timeout);
-      ws.close();
-      reject(error);
+      if (!connectionAttempted) {
+        console.error('Failed to connect to WebSocket. Check if the backend server is running and accessible.');
+        console.error('If using HTTPS for the backend, make sure to use WSS for WebSocket connections.');
+        console.error('Backend URL:', environment.websocketUrl);
+        console.error('Current origin:', window.location.origin);
+        console.error('Protocol:', window.location.protocol);
+        reject(new Error('WebSocket connection failed. Check console for details.'));
+      }
     };
 
     ws.onclose = (event) => {
-      console.debug('WebSocket closed:', event);
+      console.debug('WebSocket closed:', event.code, event.reason);
       clearTimeout(timeout);
-      if (!event.wasClean) {
-        reject(new Error(`WebSocket connection closed unexpectedly: ${event.code}`));
+      if (!connectionAttempted) {
+        console.error('WebSocket connection closed with code:', event.code);
+        console.error('Reason:', event.reason || 'No reason provided');
+        console.error('Was clean:', event.wasClean);
+        reject(new Error(`WebSocket connection closed: ${event.code} - ${event.reason}`));
       }
     };
   });

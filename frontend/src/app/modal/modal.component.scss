@@ -23,7 +23,10 @@
   height: 95vh;
   background: rgba(15, 15, 15, 0.9);
   border-radius: 8px;
-  
+  padding: max(10px, env(safe-area-inset-top))
+          max(10px, env(safe-area-inset-right))
+          max(10px, env(safe-area-inset-bottom))
+          max(10px, env(safe-area-inset-left));
   @media (min-width: 768px) {
     width: 90vw;
     height: 90vh;
@@ -31,10 +34,7 @@
   }
 
   /* Safe area insets for modern iOS devices */
-  padding: max(10px, env(safe-area-inset-top))
-           max(10px, env(safe-area-inset-right))
-           max(10px, env(safe-area-inset-bottom))
-           max(10px, env(safe-area-inset-left));
+
 }
 
 /* Zoom Animation */

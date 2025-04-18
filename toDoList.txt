@@ -1,0 +1,206 @@
+**RULES**
+
+1. SCOPE RESTRICTION: Implement ONLY the tasks outlined in this list. Do not add features beyond what's specified.
+
+
+3. PRESERVE BACKEND FUNCTIONALITY: The backend code is working perfectly. DO NOT change anything about how it processes data or solves mazes. This visualization should ONLY be triggered AFTER the backend has sent solutions back to the frontend.
+
+4. REGULAR CHECK-INS: Check in after completing every 1-2 to-do items to report progress, reasoning, current status, and next steps. This allows for course correction if needed.
+
+5. USE DOCUMENTATION: Refer to NetworkX and other library documentation whenever possible, providing proper citations.
+
+6. TRACK COMPLETION: Cross out each task when completed to maintain a clear record of progress.
+
+**TO-DO LIST ITEMS**
+PROJECT: Clean up visualizer module code in python backend and better integrate it into the codebase.
+PORJECT PURPOSE: The visualizer module exists solely to help humans review the backend's work and verify that it correctly identifies longest paths in the graphs sent by the frontend. It should provide clear, easy-to-understand visuals.
+
+## Phase 1: Refactor and Simplify GraphVisualizer
+
+1. **DONE Clean Up Visualizer Package:**
+   * Identify and remove redundant/unused visualization methods in `backend/visualizer/graph_visualizer.py`
+   * Keep only essential components like `hex_grid_layout` and core drawing utilities
+   * Document which methods are being removed and why
+
+2. **DONE Add Component Report Visualization Method:**
+   * Create a new streamlined method in `GraphVisualizer`:
+     ```python
+     def create_component_report(self, 
+                               dimensions: Dict[str, int],
+                               components_data: List[Dict], 
+                               return_bytes: bool = True) -> Union[str, bytes]:
+         """
+         Create a comprehensive visualization showing:
+         1. Grid view with components colored uniquely and longest paths highlighted
+         2. Abstract graph views of each component with paths highlighted
+         
+         Args:
+             dimensions: Dictionary with 'rows' and 'cols' keys
+             components_data: List of dicts, each containing:
+                 - id: Component identifier
+                 - nodes: List of node IDs in this component
+                 - adjacency: Dict mapping node IDs to neighbor lists
+                 - longest_path: List of nodes in longest path
+             return_bytes: If True, return PNG bytes instead of filepath
+             
+         Returns:
+             Either filepath (str) or PNG image data (bytes)
+         """
+     ```
+   
+3. **DONE Implement Grid Visualization:**
+   * Use existing `hex_grid_layout` method for the grid coordinates
+   * Add code to color components uniquely
+   * Draw longest paths with distinct, high-visibility styling
+
+4. **DONE Implement Abstract Component Views:**
+   * For each component, create a separate graph layout using NetworkX's `kamada_kawai_layout`
+   * Show thin edges for all connections and thick edges for path segments
+   * Arrange these views in a grid below or beside the main visualization
+
+5. **DONE Add In-Memory Return Option:**
+   * Implement `io.BytesIO` buffer support:
+     ```python
+     if return_bytes:
+         buf = io.BytesIO()
+         plt.savefig(buf, format='png', dpi=150)
+         plt.close(fig)
+         buf.seek(0)
+         return buf.getvalue()
+     else:
+         # Use existing file saving logic
+         filepath = os.path.join(self.output_dir, f"component_report_{timestamp}.png")
+         plt.savefig(filepath)
+         plt.close(fig)
+         return filepath
+     ```
+
+## Phase 2: WebSocket Integration
+
+6. **DONE Identify Post-Solver Hook:**
+   * In `backend/main.py`, locate where solution results are sent to frontend
+   * Add visualization generation after this point
+
+7. **DONE Create GCS Utilities:**
+   * Create a new file `backend/utils/gcs_utils.py` with upload function:
+     ```python
+     from google.cloud import storage
+     import logging
+
+     def upload_bytes_to_gcs(bucket_name: str, blob_name: str, data: bytes, 
+                           content_type: str = 'image/png') -> str:
+         """Upload bytes to GCS and return public URL"""
+         client = storage.Client()
+         bucket = client.bucket(bucket_name)
+         blob = bucket.blob(blob_name)
+         blob.upload_from_string(data, content_type=content_type)
+         return f"https://storage.googleapis.com/{bucket_name}/{blob_name}"
+     ```
+
+8. **DONE Implement Async Visualization Generation:**
+   * Add non-blocking function to generate and upload visualization:
+     ```python
+     async def generate_component_report(self, data: dict, all_solutions: List[List[str]], websocket=None):
+         """Async function to generate visualization and upload to GCS"""
+         visualizer = GraphVisualizer()
+         try:
+             # Prepare component data
+             components_data = [...]  # Format data for visualization
+             
+             # Generate visualization
+             image_bytes = visualizer.create_component_report(
+                 dimensions, components_data, return_bytes=True)
+                 
+             # Upload to GCS
+             blob_name = f"visualizations/{session_id}/{timestamp}.png"
+             url = upload_bytes_to_gcs(BUCKET_NAME, blob_name, image_bytes)
+             
+             # Notify client if connected
+             if websocket and websocket.client_state.CONNECTED:
+                 await websocket.send_json({
+                     "type": "visualization_ready",
+                     "url": url
+                 })
+         except Exception as e:
+             logging.error(f"Visualization generation failed: {str(e)}")
+     ```
+
+## Phase 3: API Endpoint
+
+9. **DONE Create Visualization API Endpoint:**
+   * Add route in appropriate file (e.g., `backend/api/routes.py`):
+     ```python
+     from fastapi import APIRouter, HTTPException
+     from fastapi.responses import RedirectResponse
+     from google.cloud import storage
+     import os
+
+     router = APIRouter()
+     BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "your-bucket-name")
+
+     @router.get("/visualize/maze/{session_id}/latest")
+     async def get_latest_visualization(session_id: str):
+         """Get the latest visualization for a maze session"""
+         try:
+             client = storage.Client()
+             bucket = client.bucket(BUCKET_NAME)
+             blobs = list(bucket.list_blobs(prefix=f"visualizations/{session_id}/"))
+             
+             if not blobs:
+                 raise HTTPException(status_code=404, 
+                                   detail="No visualizations found for this session")
+                 
+             # Sort by name (which includes timestamp)
+             latest_blob = sorted(blobs, key=lambda b: b.name, reverse=True)[0]
+             url = f"https://storage.googleapis.com/{BUCKET_NAME}/{latest_blob.name}"
+             
+             return RedirectResponse(url=url)
+             
+         except Exception as e:
+             raise HTTPException(status_code=500, 
+                               detail=f"Error retrieving visualization: {str(e)}")
+     ```
+
+10. **DONE Register API Router:**
+    * This is already done as the router is already included in the main FastAPI app
+
+## Phase 4: Deployment
+
+11. **DONE Update Dependencies:**
+    * Add to `requirements.txt`:
+      ```
+      google-cloud-storage>=2.0.0
+      ```
+
+12. **Prepare Cloud Run Deployment:**
+    * Add environment variable for `GCS_BUCKET_NAME`
+    * Ensure service account has Storage Object Admin role on the bucket
+    
+## Phase 4.5: Development Environment
+
+12.5. **DONE Configure Development Environment:**
+    * Updated CORS settings to support local development URLs
+    * Created startup script (dev_server.sh) with environment variables
+    * Added local fallback for GCS in development mode
+    * Created test HTML page for direct visualization access
+
+12.6. **DONE Fix Hexagonal Grid Layout:**
+    * Fixed the hex_grid_layout method to correctly place hexagons
+    * Ensured node #1 appears in the top-left corner
+    * Implemented proper row-based offsets for pointy-top hexagons
+    * Updated all visualization methods for consistency
+
+## Phase 5: Testing
+
+13. **DONE Test Locally:**
+    * Test WebSocket flow with visualization generation
+    * Test API endpoint with sample session IDs
+    * Added local fallback for GCS storage during development
+    * Created test scripts for visualization generation and WebSocket testing
+
+14. **Test Deployed Version:**
+    * Verify visualization generation works in Cloud Run
+    * Check GCS uploads succeed
+    * Verify API endpoint returns correct visualizations
+
+**RANDOM THOUGHTS**

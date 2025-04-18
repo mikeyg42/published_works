@@ -1,5 +1,4 @@
 import { Injectable, Inject, PLATFORM_ID } from '@angular/core';
-import { isPlatformBrowser } from '@angular/common';
 
 interface HexCell {
   x: number;
@@ -74,8 +73,8 @@ export class MazeGeneratorService {
   private readonly MAX_HEXAGONS_PER_ROW = 60;
   private readonly MIN_HEXAGONS_PER_ROW = 9;
   private readonly MAX_RADIUS = 75;
-  private readonly MIN_HEXAGON_WIDTH = 13;
-  private readonly PADDING_RATIO = 3; // Padding will be this ratio of hexSize
+  private readonly MIN_HEXAGON_WIDTH = 15;
+  private readonly PADDING_RATIO = 2; // Padding will be this ratio of hexSize
   
   private hexSize!: number;
   private padding!: number;
@@ -87,15 +86,44 @@ export class MazeGeneratorService {
 
   /**
    * Generates a hex maze and returns the pathMap for 3D visualization
-   * @param cw Canvas/container width
-   * @param ch Canvas/container height
+   * @param cwOrRows Canvas/container width or rows
+   * @param chOrCols Canvas/container height or columns
+   * @param usePresetDimensions Whether to use preset dimensions
    * @returns PathMap object containing maze data
    */
-  generateMaze(cw: number, ch: number): PathMap {
-    if (!isPlatformBrowser(this.platformId)) {
-      throw new Error('Cannot generate maze during server-side rendering');
+  generateMaze(cwOrRows: number, chOrCols: number, usePresetDimensions: boolean = false): PathMap {
+    // If using preset dimensions
+    if (usePresetDimensions) {
+      this.rows = cwOrRows;
+      this.cols = chOrCols;
+      
+      // Set reasonable hex size
+      this.hexSize = this.MIN_HEXAGON_WIDTH / Math.sqrt(3);
+      const hexWidth = this.hexSize * Math.sqrt(3);
+      
+      // Simple padding
+      this.padding = 1;
+      
+      console.log('Using preset dimensions:', { 
+        rows: this.rows, 
+        cols: this.cols,
+        hexSize: this.hexSize 
+      });
+      
+      // Generate maze with preset dimensions
+      const xOffset = this.padding;
+      const yOffset = this.padding;
+      
+      this.initializeGrid(xOffset, yOffset);
+      this.generateMazePaths();
+      
+      return this.createPathMap();
     }
-
+    
+    // Original canvas-based dimension calculation
+    const cw = cwOrRows;
+    const ch = chOrCols;
+    
     // Calculate minimum hex width ensuring no more than MAX_HEXAGONS_PER_ROW
     let minWidth = Math.max(this.MIN_HEXAGON_WIDTH, Math.floor(cw / this.MAX_HEXAGONS_PER_ROW));
     const tempPadding = this.MIN_HEXAGON_WIDTH * this.PADDING_RATIO;
@@ -112,7 +140,8 @@ export class MazeGeneratorService {
     // Randomly select a hex width within the valid range
     const hexWidth = Math.floor(Math.random() * (maxWidth - minWidth + 1)) + minWidth;
     this.hexSize = hexWidth / Math.sqrt(3);
-    this.padding = 80; // Fixed padding for consistent layout
+    //this.padding = this.hexSize * this.PADDING_RATIO; // now that we have the final hexWidth, we toss tempPadding and caluclate real padding
+    this.padding = 1; // we don't really care about this any longer
 
     console.log('Hex size calculations:', {
       minWidth,
@@ -244,8 +273,8 @@ export class MazeGeneratorService {
     const edges = new Set<string>();
     
     // Distribution arrays for edge count selection
-    const normalDistribution = [0, 1, 1, 2, 2, 2];
-    const edgeDistribution = [0, 1, 1, 1, 2, 2];
+    const normalDistribution = [0, 0, 1, 2, 3];
+    const edgeDistribution = [0, 1, 1,  2];
     
     for (let row = 0; row < this.rows; row++) {
       for (let col = 0; col < this.cols; col++) {
@@ -314,66 +343,69 @@ export class MazeGeneratorService {
     console.log('Edge count statistics:', stats);
 
     // Distribution for how many edges to remove from high-degree nodes
-    const removalDistribution = [1, 2, 2];
-    
-    // Find all hexagons with degree 5 or 6
-    const highDegreeNodes = Array.from(edgesPerCell.entries())
-      .filter(([_, count]) => count >= 5)
-      .map(([linearId]) => linearId);
-    
-    if (highDegreeNodes.length > 0) {
-      console.log(`Found ${highDegreeNodes.length} high-degree nodes to process`);
-    }
-    
-    // Process each high degree node
-    highDegreeNodes.forEach(centralId => {
-      const centralCell = this.getCellFromLinearId(centralId)!;
+    const removalDistribution = [0, 1, 2, 3];
+    while (true) {
+      // Find all hexagons with degree 5 or 6
+      const highDegreeNodes = Array.from(edgesPerCell.entries())
+        .filter(([_, count]) => count >= 5)
+        .map(([linearId]) => linearId);
       
-      // Get all valid neighbors
-      const validNeighbors = centralCell.neighbors
-        .map((neighbor, direction) => ({ neighbor, direction }))
-        .filter(({neighbor}) => neighbor !== null)
-        .map(({neighbor, direction}) => ({
-          neighborId: neighbor!.linearId,
-          direction
-        }));
+      if (highDegreeNodes.length > 0) {
+        console.log(`Found ${highDegreeNodes.length} high-degree nodes to process`);
+      } else {
+        break;
+      }
       
-      // Randomly select how many edges to remove
-      const edgesToRemove = removalDistribution[
-        Math.floor(Math.random() * removalDistribution.length)
-      ];
-      
-      // Randomly select which neighbors to disconnect from
-      const shuffledNeighbors = [...validNeighbors]
-        .sort(() => Math.random() - 0.5)
-        .slice(0, edgesToRemove);
-      
-      // Remove selected edges
-      shuffledNeighbors.forEach(({neighborId}) => {
-        // Find and remove the edge
-        const [minId, maxId] = [centralId, neighborId].sort((a, b) => a - b);
-        const edgeExists = this.edges.some(edge => 
-          edge.from === minId && edge.to === maxId
-        );
+      // Process each high degree node
+      highDegreeNodes.forEach(centralId => {
+        const centralCell = this.getCellFromLinearId(centralId)!;
         
-        if (edgeExists) {
-          this.edges = this.edges.filter(edge => 
-            !(edge.from === minId && edge.to === maxId)
+        // Get all valid neighbors
+        const validNeighbors = centralCell.neighbors
+          .map((neighbor, direction) => ({ neighbor, direction }))
+          .filter(({neighbor}) => neighbor !== null)
+          .map(({neighbor, direction}) => ({
+            neighborId: neighbor!.linearId,
+            direction
+          }));
+        
+        // Randomly select how many edges to remove
+        const edgesToRemove = removalDistribution[
+          Math.floor(Math.random() * removalDistribution.length)
+        ];
+        
+        // Randomly select which neighbors to disconnect from
+        const shuffledNeighbors = [...validNeighbors]
+          .sort(() => Math.random() - 0.5)
+          .slice(0, edgesToRemove);
+        
+        // Remove selected edges
+        shuffledNeighbors.forEach(({neighborId}) => {
+          // Find and remove the edge
+          const [minId, maxId] = [centralId, neighborId].sort((a, b) => a - b);
+          const edgeExists = this.edges.some(edge => 
+            edge.from === minId && edge.to === maxId
           );
           
-          // Update counts
-          const currentCount = edgesPerCell.get(centralId) || 0;
-          const neighborCount = edgesPerCell.get(neighborId) || 0;
-          
-          if (currentCount > 0) {
-            edgesPerCell.set(centralId, currentCount - 1);
+          if (edgeExists) {
+            this.edges = this.edges.filter(edge => 
+              !(edge.from === minId && edge.to === maxId)
+            );
+            
+            // Update counts
+            const currentCount = edgesPerCell.get(centralId) || 0;
+            const neighborCount = edgesPerCell.get(neighborId) || 0;
+            
+            if (currentCount > 0) {
+              edgesPerCell.set(centralId, currentCount - 1);
+            }
+            if (neighborCount > 0) {
+              edgesPerCell.set(neighborId, neighborCount - 1);
+            }
           }
-          if (neighborCount > 0) {
-            edgesPerCell.set(neighborId, neighborCount - 1);
-          }
-        }
+        });
       });
-    });
+    }
     
     // Log final statistics after edge removal
     const finalCounts = Array.from(edgesPerCell.values());

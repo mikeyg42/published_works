@@ -1,10 +1,10 @@
 import networkx as nx
 import matplotlib.pyplot as plt
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional, Union
 from datetime import datetime
 import os
-import math
+import io
 from matplotlib.colors import LinearSegmentedColormap
 
 export = True
@@ -13,6 +13,7 @@ class GraphVisualizer:
     """
     Visualizes graphs and paths through them, with support for hexagonal grid layouts.
     Uses pointy-top hexagon orientation.
+
     """
     
     def __init__(self, output_dir: str = "visualizations"):
@@ -65,14 +66,31 @@ class GraphVisualizer:
         """
         Generate a pointy-top hexagonal grid layout based on node IDs.
         Assumes 1-indexed node IDs starting from top-left, going row by row.
+        
+        For pointy-top hexagons:
+        - Node #1 is placed at the top-left corner
+        - Odd-indexed rows are shifted to the right by (hex_width/2)
         """
         positions = {}
         nodes = list(G.nodes())
         
-        # If rows and cols not provided, estimate them
+        # Get dimensions
         ncols = dimensions['cols']
         
-        # Try to interpret node IDs as integers
+        # Calculate hexagon dimensions for pointy-top orientation
+        # For pointy-top hexagons, height = 2*radius, width = sqrt(3)*radius
+        hex_radius = 1.0  # Base unit
+        hex_width = hex_radius * np.sqrt(3)
+        hex_height = 2 * hex_radius
+        
+        # Horizontal spacing between hexagon centers is 3/4 of the hexagon width
+        x_spacing = hex_width  # This makes hexagons share edges
+        # Vertical spacing is the height of the hexagon
+        y_spacing = (3/2) * hex_radius
+        
+        # X-offset for odd-indexed rows
+        odd_row_x_offset = x_spacing / 2
+        
         try:
             node_ids = [int(node) for node in nodes]
             
@@ -83,14 +101,22 @@ class GraphVisualizer:
                 
                 # Calculate row and column (0-indexed)
                 row = pos // ncols
-                col = (pos % ncols) 
+                col = pos % ncols
                 
                 # Apply hexagonal layout coordinates
                 # For pointy-top hexagons:
-                x = col * 0.75
-                y = row + (0.5 if (col % 2 == 1) else 0)
-
-                positions[str(node_id)] = np.array([x, y])
+                # 1. Calculate the base position
+                x = col * x_spacing
+                y = row * y_spacing
+                
+                # 2. Apply horizontal offset for odd rows
+                if row % 2 == 1:  # Odd-indexed row
+                    x += odd_row_x_offset
+                
+                # Store position
+                # Note that we invert the y-coordinate to have node #1 at the top-left
+                # (in matplotlib, lower y values are at the top of the plot)
+                positions[str(node_id)] = np.array([x, -y])
                 
         except ValueError:
             # Fall back to spring layout if nodes aren't integers
@@ -99,15 +125,257 @@ class GraphVisualizer:
         
         return positions
     
-    def maintain_clockwise_order(self, G: nx.Graph, adjacency_dict: Dict[str, List[str]]) -> nx.Graph:
-        """Ensure the graph maintains the clockwise ordering of neighbors."""
-        # This function preserves the neighbor ordering from your adjacency dict
-        for node, neighbors in adjacency_dict.items():
-            if node in G:
-                # Store the clockwise ordering as a node attribute
-                G.nodes[node]['clockwise_neighbors'] = neighbors
-        return G
+    def create_component_report(self, 
+                              dimensions: Dict[str, int],
+                              components_data: List[Dict], 
+                              return_bytes: bool = True) -> Union[str, bytes]:
+        """
+        Create a comprehensive visualization showing:
+        1. Grid view with components colored uniquely and longest paths highlighted
+        2. Abstract graph views of each component with paths highlighted
+        
+        Args:
+            dimensions: Dictionary with 'rows' and 'cols' keys
+            components_data: List of dicts, each containing:
+                - id: Component identifier
+                - nodes: List of node IDs in this component
+                - adjacency: Dict mapping node IDs to neighbor lists
+                - longest_path: List of nodes in longest path
+            return_bytes: If True, return PNG bytes instead of filepath
+            
+        Returns:
+            Either filepath (str) or PNG image data (bytes)
+        """
+        # Skip if no components provided
+        if not components_data:
+            print("No component data provided for visualization")
+            return b"" if return_bytes else ""
+        
+        # Determine figure layout based on number of components
+        num_components = len(components_data)
+        grid_height = 8  # Height allocation for the main grid view
+        
+        # Calculate how many component graphs to show per row
+        comps_per_row = min(3, num_components)
+        comp_rows = (num_components + comps_per_row - 1) // comps_per_row  # Ceiling division
+        
+        # Set up figure
+        total_height = grid_height + 4 * comp_rows
+        fig = plt.figure(figsize=(15, total_height), dpi=120)
+        
+        # Create grid for subplots
+        grid_spec = plt.GridSpec(1 + comp_rows, comps_per_row, height_ratios=[grid_height] + [4] * comp_rows)
+        
+        # 1. Create the main grid view showing all components
+        ax_grid = fig.add_subplot(grid_spec[0, :])
+        self._draw_grid_view(ax_grid, dimensions, components_data)
+        
+        # 2. Create abstract views for each component
+        for i, component_data in enumerate(components_data):
+            row = 1 + (i // comps_per_row)
+            col = i % comps_per_row
+            ax_comp = fig.add_subplot(grid_spec[row, col])
+            self._draw_component_view(ax_comp, component_data)
+        
+        # Adjust layout
+        plt.tight_layout()
+        
+        # Save or return the figure
+        if return_bytes:
+            # Save to in-memory buffer
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png')
+            plt.close(fig)
+            buf.seek(0)
+            return buf.getvalue()
+        else:
+            # Save to file
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            filename = f"component_report_{timestamp}.png"
+            filepath = os.path.join(self.output_dir, filename)
+            plt.savefig(filepath)
+            plt.close(fig)
+            return filepath
     
+    def _draw_grid_view(self, ax, dimensions: Dict[str, int], components_data: List[Dict]):
+        """
+        Draw a grid view with hexagonal cells colored by component.
+        
+        Args:
+            ax: Matplotlib Axes object to draw on
+            dimensions: Dictionary with grid dimensions
+            components_data: List of component data dicts
+        """
+        # Create a unified graph containing all nodes
+        all_nodes = set()
+        for component in components_data:
+            all_nodes.update(component.get('nodes', []))
+        
+        full_adjacency = {}
+        for component in components_data:
+            full_adjacency.update(component.get('adjacency', {}))
+        
+        # Create networkx graph for layout calculation
+        G_full = self.create_nx_graph(full_adjacency)
+        
+        # Calculate positions for all nodes
+        pos = self.hex_grid_layout(G_full, dimensions)
+        
+        # Generate a distinct color palette for components
+        # Using tab10/tab20 for up to 20 components, then generate colors for more
+        if len(components_data) <= 10:
+            colors = plt.cm.tab10(np.linspace(0, 1, 10))
+        elif len(components_data) <= 20:
+            colors = plt.cm.tab20(np.linspace(0, 1, 20))
+        else:
+            colors = plt.cm.hsv(np.linspace(0, 1, len(components_data)))
+        
+        # Calculate hexagon size based on grid spacing
+        hex_radius = 1.0  # Base unit (same as in hex_grid_layout)
+        hex_size = hex_radius * 0.97  # Slightly smaller than the actual radius for better visualization
+        
+        # Draw hexagons for each component
+        for comp_idx, component in enumerate(components_data):
+            comp_color = colors[comp_idx % len(colors)]
+            nodes = component.get('nodes', [])
+            
+            # Draw each node as a hexagon
+            for node in nodes:
+                if node not in pos:
+                    continue
+                    
+                x, y = pos[node]
+                
+                # Create pointy-top hexagon shape
+                angles = np.pi/2 + np.linspace(0, 2*np.pi, 7)[:-1]  # 6 points, rotated for pointy-top
+                hex_x = x + hex_size * np.cos(angles)
+                hex_y = y + hex_size * np.sin(angles)
+                hex_points = list(zip(hex_x, hex_y))
+                
+                # Draw the hexagon with component color
+                ax.add_patch(plt.Polygon(hex_points, color=comp_color, alpha=0.7))
+                
+                # Add node labels for smaller grids
+                if len(pos) < 100:
+                    ax.text(x, y, node, ha='center', va='center', fontsize=7,
+                          bbox=dict(facecolor='white', alpha=0.6, boxstyle='round,pad=0.1'))
+        
+        # Draw longest paths on top with thick black lines
+        for comp_idx, component in enumerate(components_data):
+            path = component.get('longest_path', [])
+            
+            if len(path) > 1:
+                # Draw path segments as lines
+                for i in range(len(path) - 1):
+                    node1, node2 = path[i], path[i+1]
+                    if node1 in pos and node2 in pos:
+                        x1, y1 = pos[node1]
+                        x2, y2 = pos[node2]
+                        ax.plot([x1, x2], [y1, y2], color='black', linewidth=2.5, alpha=0.8)
+                
+                # Mark start and end nodes
+                if path[0] in pos:
+                    x, y = pos[path[0]]
+                    ax.plot(x, y, 'go', markersize=10, alpha=0.8)  # Green circle for start
+                
+                if path[-1] in pos:
+                    x, y = pos[path[-1]]
+                    ax.plot(x, y, 'ro', markersize=10, alpha=0.8)  # Red circle for end
+        
+        # Set axis limits with padding
+        if pos:
+            x_coords = [p[0] for p in pos.values()]
+            y_coords = [p[1] for p in pos.values()]
+            padding = max(dimensions['rows'], dimensions['cols']) * 0.2
+            ax.set_xlim(min(x_coords) - padding, max(x_coords) + padding)
+            ax.set_ylim(min(y_coords) - padding, max(y_coords) + padding)
+        
+        # Set up the plot
+        ax.set_title(f"Maze Components Grid View ({dimensions['rows']}×{dimensions['cols']})", fontsize=14)
+        ax.set_aspect('equal')
+        ax.axis('off')
+        
+        # Add a legend for components
+        legend_elements = [plt.Line2D([0], [0], marker='o', color='w', 
+                                     markerfacecolor=colors[i % len(colors)], 
+                                     markersize=10, label=f"Component {i+1}") 
+                         for i in range(len(components_data))]
+        ax.legend(handles=legend_elements, loc='upper right', ncol=min(5, len(components_data)))
+    
+    def _draw_component_view(self, ax, component_data: Dict):
+        """
+        Draw an abstract view of a single component with its longest path highlighted.
+        
+        Args:
+            ax: Matplotlib Axes object to draw on
+            component_data: Dictionary with component information
+        """
+        component_id = component_data.get('id', '?')
+        adjacency = component_data.get('adjacency', {})
+        nodes = component_data.get('nodes', [])
+        path = component_data.get('longest_path', [])
+        
+        # Skip if no adjacency information
+        if not adjacency:
+            ax.text(0.5, 0.5, "No graph data", ha='center', va='center')
+            ax.set_title(f"Component {component_id}")
+            ax.axis('off')
+            return
+        
+        # Create a graph for this component
+        G_comp = self.create_nx_graph(adjacency)
+        
+        # Use a force-directed layout for abstract view
+        try:
+            pos = nx.kamada_kawai_layout(G_comp)
+        except:
+            # Fallback to spring layout if kamada_kawai fails
+            pos = nx.spring_layout(G_comp, seed=42)
+        
+        # Draw regular edges first (light gray)
+        nx.draw_networkx_edges(G_comp, pos, ax=ax, 
+                             width=1.0, edge_color='lightgray', alpha=0.7)
+        
+        # Draw all nodes (light blue)
+        nx.draw_networkx_nodes(G_comp, pos, ax=ax,
+                              node_size=100, node_color='lightblue', alpha=0.7)
+        
+        # Draw the path if provided
+        if path and len(path) > 1:
+            # Extract edges from the path
+            path_edges = list(zip(path[:-1], path[1:]))
+            
+            # Draw path edges as thick black lines
+            nx.draw_networkx_edges(G_comp, pos, ax=ax,
+                                 edgelist=path_edges, 
+                                 width=2.5, edge_color='black', alpha=0.8)
+            
+            # Highlight start and end nodes
+            nx.draw_networkx_nodes(G_comp, pos, ax=ax, 
+                                 nodelist=[path[0]], 
+                                 node_size=150, node_color='green', alpha=1.0)
+            
+            nx.draw_networkx_nodes(G_comp, pos, ax=ax,
+                                 nodelist=[path[-1]], 
+                                 node_size=150, node_color='red', alpha=1.0)
+            
+            # Draw the rest of the path nodes
+            if len(path) > 2:
+                nx.draw_networkx_nodes(G_comp, pos, ax=ax,
+                                     nodelist=path[1:-1], 
+                                     node_size=120, node_color='orange', alpha=0.8)
+        
+        # Add labels for smaller graphs
+        if len(G_comp) < 50:
+            nx.draw_networkx_labels(G_comp, pos, ax=ax, font_size=8, font_family='sans-serif')
+        
+        # Set up the plot
+        path_len = len(path) if path else 0
+        nodes_len = len(G_comp.nodes())
+        ax.set_title(f"Component {component_id} - Path: {path_len}/{nodes_len} nodes", fontsize=12)
+        ax.axis('off')
+    
+    # Legacy helper methods needed by MazeSolver
     def visualize_graph(self, 
                         dimensions: Dict[str, int],
                         adjacency_dict: Dict[str, List[str]], 
@@ -120,10 +388,11 @@ class GraphVisualizer:
         """
         Visualize a graph and optionally a path through it.
         Saves to a file without displaying unless show=True.
+        
+        Note: This is a legacy method maintained for backward compatibility.
         """
         # Create graph and determine layout
         G = self.create_nx_graph(adjacency_dict)
-        G = self.maintain_clockwise_order(G, adjacency_dict)
         
         # Use hexagonal layout
         pos = self.hex_grid_layout(G, dimensions)
@@ -196,6 +465,14 @@ class GraphVisualizer:
                     alpha=0.9
                 )
         
+        # Set axis limits with padding
+        if pos:
+            x_coords = [p[0] for p in pos.values()]
+            y_coords = [p[1] for p in pos.values()]
+            padding = max(dimensions.get('rows', 10), dimensions.get('cols', 10)) * 0.2
+            plt.xlim(min(x_coords) - padding, max(x_coords) + padding)
+            plt.ylim(min(y_coords) - padding, max(y_coords) + padding)
+        
         # Add title and adjust layout
         plt.title(f"{title} - {len(G)} nodes, {len(path) if path else 0} in path")
         plt.axis("off")
@@ -222,6 +499,8 @@ class GraphVisualizer:
                                   show: bool = False) -> str:
         """
         Visualize the graph as explicit pointy-top hexagons to better represent the tiling.
+        
+        Note: This is a legacy method maintained for backward compatibility.
         """
         G = self.create_nx_graph(adjacency_dict)
             
@@ -231,20 +510,9 @@ class GraphVisualizer:
         plt.figure(figsize=(12, 10))
         ax = plt.gca()
         
-        # Calculate hexagon size based on spacing
-        if pos:
-            # Find minimum distance between neighboring nodes
-            min_dist = float('inf')
-            for node in G.nodes():
-                for neighbor in G.neighbors(node):
-                    if node in pos and neighbor in pos:
-                        dist = np.linalg.norm(np.array(pos[node]) - np.array(pos[neighbor]))
-                        min_dist = min(min_dist, dist)
-            
-            # Use a reasonable hexagon size relative to node spacing
-            hex_size = min_dist / 2 if min_dist < float('inf') else 0.4
-        else:
-            hex_size = 0.4
+        # Use consistent hexagon size with hex_grid_layout
+        hex_radius = 1.0  # Base unit
+        hex_size = hex_radius * 0.97  # Slightly smaller for better visualization
         
         # Draw hexagons
         for node in G.nodes():
@@ -266,7 +534,6 @@ class GraphVisualizer:
                     color = self.path_cmap(path_pos)
             
             # Create pointy-top hexagon shape
-            # Start at top point (0 degrees) and move clockwise
             angles = np.pi/2 + np.linspace(0, 2*np.pi, 7)[:-1]  # 6 points, rotated for pointy-top
             hex_x = x + hex_size * np.cos(angles)
             hex_y = y + hex_size * np.sin(angles)
@@ -303,12 +570,13 @@ class GraphVisualizer:
             
             plt.plot([x1, x2], [y1, y2], color=edge_color, linewidth=edge_width, alpha=alpha)
         
-        # Set axis limits with some padding
-        x_coords = [p[0] for p in pos.values()]
-        y_coords = [p[1] for p in pos.values()]
-        margin = hex_size * 1.5
-        plt.xlim(min(x_coords) - margin, max(x_coords) + margin)
-        plt.ylim(min(y_coords) - margin, max(y_coords) + margin)
+        # Set axis limits with padding
+        if pos:
+            x_coords = [p[0] for p in pos.values()]
+            y_coords = [p[1] for p in pos.values()]
+            padding = max(dimensions.get('rows', 10), dimensions.get('cols', 10)) * 0.2
+            plt.xlim(min(x_coords) - padding, max(x_coords) + padding)
+            plt.ylim(min(y_coords) - padding, max(y_coords) + padding)
         
         plt.title(title)
         plt.axis("equal")
@@ -328,163 +596,14 @@ class GraphVisualizer:
         
         return filepath
     
-    def visualize_clockwise_ordering(self,
-                                    adjacency_list: Dict[str, List[str]],
-                                    node_id: str,
-                                    title: str = "Clockwise Ordering",
-                                    filename_prefix: str = "clockwise",
-                                    show: bool = False) -> str:
-        """
-        Visualize the clockwise ordering of neighbors around a specific node.
-        """
-        if node_id not in adjacency_list:
-            print(f"Node {node_id} not found in adjacency list")
-            return ""
-            
-        neighbors = adjacency_list[node_id]
-        if not neighbors:
-            print(f"Node {node_id} has no neighbors")
-            return ""
-        
-        # Create figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        
-        # Left plot: visual representation
-        G = nx.Graph()
-        G.add_node(node_id)
-        for neighbor in neighbors:
-            G.add_node(neighbor)
-            G.add_edge(node_id, neighbor)
-        
-        # Position the central node at origin
-        pos = {node_id: np.array([0, 0])}
-        
-        # Position neighbors in a hexagon around central node
-        num_neighbors = len(neighbors)
-        for i, neighbor in enumerate(neighbors):
-            # Start from top (π/2) and go clockwise
-            angle = np.pi/2 - 2 * np.pi * i / max(1, num_neighbors)
-            x = np.cos(angle)
-            y = np.sin(angle)
-            pos[neighbor] = np.array([x, y])
-        
-        # Draw the central node
-        nx.draw_networkx_nodes(G, pos, ax=ax1, nodelist=[node_id], 
-                            node_color="red", node_size=500)
-        
-        # Draw neighbors with color gradient to show order
-        colors = plt.cm.hsv(np.linspace(0, 1, num_neighbors))
-        nx.draw_networkx_nodes(G, pos, ax=ax1, nodelist=neighbors, 
-                            node_color=colors, node_size=300)
-        
-        # Draw edges
-        nx.draw_networkx_edges(G, pos, ax=ax1, width=1.5)
-        
-        # Add node labels
-        nx.draw_networkx_labels(G, pos, ax=ax1)
-        
-        # Add order numbers to show clockwise ordering
-        for i, neighbor in enumerate(neighbors):
-            x, y = pos[neighbor]
-            ax1.text(x*1.2, y*1.2, f"{i+1}", fontsize=12, 
-                    bbox=dict(facecolor='white', alpha=0.7))
-        
-        ax1.set_title("Neighbor Ordering")
-        ax1.axis('equal')
-        ax1.axis('off')
-        
-        # Right plot: table view
-        ax2.axis('off')
-        table_data = [[f"#{i+1}", neighbor] for i, neighbor in enumerate(neighbors)]
-        table = ax2.table(
-            cellText=table_data,
-            colLabels=["Order", "Node ID"],
-            loc='center',
-            cellLoc='center'
-        )
-        table.auto_set_font_size(False)
-        table.set_fontsize(10)
-        table.scale(1.2, 1.5)
-        ax2.set_title("Clockwise Sequence")
-        
-        plt.suptitle(f"Clockwise Neighbors of Node {node_id}", fontsize=16)
-        plt.tight_layout()
-        
-        # Save figure
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        filename = f"{filename_prefix}_{node_id}_{timestamp}.png"
+    # Helper for saving figures
+    def _save_figure(self, filename: str) -> str:
+        """Helper method to save a figure to the output directory."""
         filepath = os.path.join(self.output_dir, filename)
         plt.savefig(filepath)
-        
-        if show:
-            plt.show()
-        else:
-            plt.close()
-        
         return filepath
     
-    def visualize_multiple_paths(self,
-                                dimensions: Dict[str, int],
-                                adjacency_dict: Dict[str, List[str]],
-                                paths: List[List[str]],
-                                title: str = "Multiple Paths Comparison",
-                                filename_prefix: str = "comparison",
-                                show: bool = False,
-                                ) -> str:
-        """
-        Visualize multiple paths on the same graph for comparison.
-        """
-        if not paths:
-            return ""
-            
-        # Create graph
-        G = self.create_nx_graph(adjacency_dict)
-    
-        
-        # Get positions
-        pos = self.hex_grid_layout(G, dimensions)
-        
-        # Create figure
-        plt.figure(figsize=(12, 10), dpi=100)
-        
-        # Draw the base graph
-        nx.draw(G, pos, with_labels=True, node_size=200, 
-                node_color="lightgray", edge_color="lightgray", width=0.5, alpha=0.5)
-        
-        # Draw each path with a different color
-        colors = plt.cm.tab10(np.linspace(0, 1, len(paths)))
-        
-        for i, path in enumerate(paths):
-            if len(path) > 1:
-                path_edges = list(zip(path[:-1], path[1:]))
-                color = colors[i % len(colors)]
-                
-                nx.draw_networkx_edges(G, pos, edgelist=path_edges, 
-                                    edge_color=color, width=2.0, alpha=0.8)
-                
-                # Highlight start/end
-                nx.draw_networkx_nodes(G, pos, nodelist=[path[0], path[-1]], 
-                                    node_color=color, node_size=300)
-        
-        # Create legend
-        legend_elements = [plt.Line2D([0], [0], color=colors[i % len(colors)], lw=2, 
-                                    label=f"Path {i+1} (len={len(path)})") 
-                        for i, path in enumerate(paths)]
-        plt.legend(handles=legend_elements, loc='upper right')
-        
-        # Finish plot
-        plt.title(title)
-        plt.axis('off')
-        
-        # Save visualization
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        filename = f"{filename_prefix}_{timestamp}.png"
-        filepath = os.path.join(self.output_dir, filename)
-        plt.savefig(filepath, bbox_inches='tight')
-        
-        if show:
-            plt.show()
-        else:
-            plt.close()
-        
-        return filepath
+# Note: The following methods were removed as they're not used by the core functionality:
+# - maintain_clockwise_order: Not needed for component visualization
+# - visualize_clockwise_ordering: Specialized debugging tool not needed for health check
+# - visualize_multiple_paths: Superseded by the new component_report functionality
