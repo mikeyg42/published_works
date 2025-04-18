@@ -1,7 +1,6 @@
 import networkx as nx
 from typing import List, Dict
 from fastapi import WebSocket
-from maze_solver import process_and_solve_maze
 import json
 import asyncio
 import concurrent.futures
@@ -18,8 +17,13 @@ from backend.utils.gcs_utils import upload_bytes_to_gcs
 from datetime import datetime
 from typing import Union
 import numpy as np
+import importlib.util
 
-GraphLike = Union[nx.Graph, nx.DiGraph, nx.MultiGraph, dict[str, list[str]]]   
+# Don't import here, instead import dynamically to avoid circular imports
+# Import only when needed in _run_rust_solver
+# from rust_maze_solver import process_and_solve_maze as rust_solver
+
+GraphLike = Union[nx.Graph, nx.DiGraph, nx.MultiGraph, dict[str, list[str]]]
 
 class MazeSolver:
     def __init__(self, output_dir: str = "maze_visualizations"):
@@ -109,11 +113,13 @@ class MazeSolver:
                 self._active_tasks[websocket].cancel()
                 print(f"Cancelling task for disconnected client")
     
-    async def solve_maze(self, data: dict, websocket: WebSocket = None):
-        """Queue a maze solving request"""
-        if websocket is None:
-            # Direct call (not via websocket) - just solve immediately
-            return await self._solve_maze_internal(data, None, "direct")
+    async def solve_maze(self, data: dict, websocket: WebSocket = None, direct=False):
+        """Queue a maze solving request or process directly if direct=True"""
+        if direct or websocket is None:
+            # Direct call (not via websocket) or explicitly requested direct processing
+            # Just solve immediately
+            print(f"Direct processing requested for session_id: {data.get('session_id')}")
+            return await self._solve_maze_internal(data, websocket, "direct")
         
         # Generate a unique task ID
         task_id = f"task_{int(time.time() * 1000)}"
@@ -140,9 +146,9 @@ class MazeSolver:
             # Use the context manager to register this task
             if websocket:
                 async with self._register_task(websocket, task_id):
-                    return await self._solve_maze_implementation(data, websocket)
+                    return await self._solve_maze_implementation(data, websocket, skip_queue_message=True)
             else:
-                return await self._solve_maze_implementation(data, websocket)
+                return await self._solve_maze_implementation(data, websocket, skip_queue_message=True)
         except asyncio.CancelledError:
             print(f"Task {task_id} cancelled during execution")
             raise
@@ -150,9 +156,32 @@ class MazeSolver:
             print(f"Error in _solve_maze_internal: {e}")
             raise
     
-    async def _solve_maze_implementation(self, data: dict, websocket: WebSocket = None):
+    async def _solve_maze_implementation(self, data: dict, websocket: WebSocket = None, skip_queue_message=False):
         """The actual implementation of maze solving - moved from solve_maze"""
         try:
+            # Inform client task has started processing
+            if websocket and not skip_queue_message:
+                # Generate a unique task ID
+                task_id = f"task_{int(time.time() * 1000)}"
+                
+                # Inform client the task was queued
+                await websocket.send_json({
+                    "type": "queued",
+                    "task_id": task_id,
+                    "position": self._task_queue.qsize()
+                })
+            
+            # Validate input data
+            if not isinstance(data, dict):
+                error_msg = f"Invalid data format: expected dictionary, got {type(data).__name__}"
+                print(error_msg)
+                if websocket:
+                    await websocket.send_json({
+                        "type": "internal_error",
+                        "error": error_msg
+                    })
+                return {"type": "internal_error", "error": error_msg}
+            
             # Handle restructured data from frontend
             if 'largeComponents' not in data:
                 # Check if this is the new structure with nested allConnComponents
@@ -160,9 +189,23 @@ class MazeSolver:
                     # Extract components from the nested structure
                     print("Received nested component structure, restructuring...")
                     components = []
+                    
+                    if not isinstance(data['allConnComponents'], list):
+                        error_msg = f"'allConnComponents' must be a list, got {type(data['allConnComponents']).__name__}"
+                        print(error_msg)
+                        if websocket:
+                            await websocket.send_json({
+                                "type": "internal_error",
+                                "error": error_msg
+                            })
+                        return {"type": "internal_error", "error": error_msg}
+                    
                     for comp_data in data['allConnComponents']:
-                        if 'adjacencyList' in comp_data:
-                            components.append(comp_data['adjacencyList'])
+                        if isinstance(comp_data, dict) and 'adjacencyList' in comp_data:
+                            if comp_data['adjacencyList'] is not None:
+                                components.append(comp_data['adjacencyList'])
+                            else:
+                                print("Warning: Found None adjacencyList in component, skipping")
                     
                     # Restructure data to expected format
                     data = {
@@ -171,11 +214,36 @@ class MazeSolver:
                         'session_id': data.get('session_id')  # Preserve session_id during restructuring
                     }
                     print(f"Restructured data contains {len(components)} components")
+                    
+                    # Check if any components were actually found
+                    if not components:
+                        error_msg = "No valid components found in allConnComponents"
+                        print(error_msg)
+                        if websocket:
+                            await websocket.send_json({
+                                "type": "internal_error",
+                                "error": error_msg
+                            })
+                        return {"type": "internal_error", "error": error_msg}
                 else:
-                    raise ValueError("Missing 'largeComponents' in input data")
+                    error_msg = "Missing required field 'largeComponents' in input data"
+                    print(error_msg)
+                    if websocket:
+                        await websocket.send_json({
+                            "type": "internal_error",
+                            "error": error_msg
+                        })
+                    return {"type": "internal_error", "error": error_msg}
             
             if not data['largeComponents']:
-                raise ValueError("No maze components provided.")
+                error_msg = "No maze components provided"
+                print(error_msg)
+                if websocket:
+                    await websocket.send_json({
+                        "type": "internal_error",
+                        "error": error_msg
+                    })
+                return {"type": "internal_error", "error": error_msg}
             
             # Extract dimensions if available
             dimensions = data.get('dimensions', {})
@@ -206,52 +274,98 @@ class MazeSolver:
             large_indices = []
             
             # Process each component based on size
-            for i, component in enumerate(data['largeComponents']):
-                # Count nodes in the component
-                # Check if component is a dictionary before using keys
-                if isinstance(component, dict):
-                    node_count = len(component.keys())
-                    
-                    if node_count <= 240: 
-                        small_components.append(component.copy())
-                        small_indices.append(i)
-                    else:
-                        large_components.append(component.copy())
-                        large_indices.append(i)
-                else:
-                    print(f"Warning: Component {i} is not a dictionary: {type(component)}")
-                    # Handle list component case - convert to dict if possible
-                    # For example, if the component is a list of connections
-                    if isinstance(component, list):
-                        # Attempt to convert list to adjacency dict format
-                        adj_dict = {}
-                        for item in component:
-                            if isinstance(item, dict) and 'from' in item and 'to' in item:
-                                from_node = str(item['from'])
-                                to_node = str(item['to'])
-                                
-                                if from_node not in adj_dict:
-                                    adj_dict[from_node] = []
-                                if to_node not in adj_dict:
-                                    adj_dict[to_node] = []
-                                    
-                                adj_dict[from_node].append(to_node)
-                                adj_dict[to_node].append(from_node)
+            try:
+                for i, component in enumerate(data['largeComponents']):
+                    # Skip None components
+                    if component is None:
+                        print(f"Warning: Component {i} is not a dictionary: {type(component)}")
+                        continue
                         
-                        # Add the converted component
-                        if adj_dict:
-                            node_count = len(adj_dict)
-                            if node_count <= 250:
-                                small_components.append(adj_dict)
-                                small_indices.append(i)
-                            else:
-                                large_components.append(adj_dict)
-                                large_indices.append(i)
+                    # Check if component is a dictionary before using keys
+                    if isinstance(component, dict):
+                        node_count = len(component.keys())
+                        
+                        # If skip_rust is True, all components go to OR-Tools
+                        if data.get('skip_rust', False):
+                            large_components.append(component.copy())
+                            large_indices.append(i)
+                            print(f"Component {i} using OR-Tools (skip_rust=True)")
+                        elif node_count <= 240: 
+                            small_components.append(component.copy())
+                            small_indices.append(i)
+                            print(f"Component {i} using Rust solver")
+                        else:
+                            large_components.append(component.copy())
+                            large_indices.append(i)
+                            print(f"Component {i} using OR-Tools solver")
+                    else:
+                        print(f"Warning: Component {i} is not a dictionary: {type(component)}")
+                        # Handle list component case - convert to dict if possible
+                        # For example, if the component is a list of connections
+                        if isinstance(component, list):
+                            # Attempt to convert list to adjacency dict format
+                            adj_dict = {}
+                            for item in component:
+                                if isinstance(item, dict) and 'from' in item and 'to' in item:
+                                    from_node = str(item['from'])
+                                    to_node = str(item['to'])
+                                    
+                                    if from_node not in adj_dict:
+                                        adj_dict[from_node] = []
+                                    if to_node not in adj_dict:
+                                        adj_dict[to_node] = []
+                                        
+                                    adj_dict[from_node].append(to_node)
+                                    adj_dict[to_node].append(from_node)
+                            
+                            # Add the converted component
+                            if adj_dict:
+                                node_count = len(adj_dict)
+                                if node_count <= 250:
+                                    small_components.append(adj_dict)
+                                    small_indices.append(i)
+                                else:
+                                    large_components.append(adj_dict)
+                                    large_indices.append(i)
+            except Exception as e:
+                error_msg = f"Error processing components: {str(e)}"
+                print(error_msg)
+                if websocket:
+                    await websocket.send_json({
+                        "type": "internal_error",
+                        "error": error_msg
+                    })
+                return {"type": "internal_error", "error": error_msg}
+                
+            # Ensure we have at least some valid components
+            if not small_components and not large_components:
+                error_msg = "No valid components found to process"
+                print(error_msg)
+                if websocket:
+                    await websocket.send_json({
+                        "type": "internal_error",
+                        "error": error_msg
+                    })
+                return {"type": "internal_error", "error": error_msg}
             
             # Check for cancellation
             if websocket and not websocket.client_state.CONNECTED:
                 print("Client disconnected, cancelling computation")
                 raise asyncio.CancelledError("Client disconnected")
+            
+            # Check if we're skipping the Rust solver
+            skip_rust = data.get('skip_rust', False)
+            
+            # First check if rust solver is available
+            try:
+                rust_spec = importlib.util.find_spec("rust_maze_solver")
+                rust_available = rust_spec is not None
+                if not rust_available:
+                    print("Warning: rust_maze_solver module not found, using OR-Tools for all components")
+                    skip_rust = True
+            except Exception as e:
+                print(f"Error checking for Rust solver: {e}")
+                skip_rust = True
             
             # Launch both solvers concurrently
             small_task = None
@@ -259,7 +373,7 @@ class MazeSolver:
             loop = asyncio.get_running_loop()
             
             # Create task for small components (Rust)
-            if small_components:
+            if small_components and not skip_rust:
                 # Create a Rust-compatible data structure
                 rust_data = {
                     'largeComponents': small_components
@@ -270,6 +384,14 @@ class MazeSolver:
                 small_task = asyncio.create_task(self._run_rust_solver(json_small_data, loop, websocket))
                 print(f"Launched Rust solver for {len(small_components)} components")
             else:
+                if small_components:
+                    print(f"Skipping Rust solver for {len(small_components)} components (using OR-Tools instead)")
+                    # If skip_rust is True, move small components to large_components
+                    large_components.extend(small_components)
+                    large_indices.extend(small_indices)
+                    small_components = []
+                    small_indices = []
+                
                 print("No small components for Rust solver")
                 small_task = asyncio.create_task(asyncio.sleep(0))  # Dummy task
             
@@ -435,18 +557,32 @@ class MazeSolver:
                 print("Client disconnected, cancelling before result processing")
                 raise asyncio.CancelledError("Client disconnected")
             
+            # Make sure results are lists
+            if small_solutions is None:
+                print("WARNING: small_solutions is None, using empty list")
+                small_solutions = []
+            
+            if or_tools_solutions is None:
+                print("WARNING: or_tools_solutions is None, using empty list")
+                or_tools_solutions = []
+            
             # Merge solutions from both solvers
             all_solutions = [None] * len(data['largeComponents'])
             
-            # Insert small component solutions
-            for idx, solution in zip(small_indices, small_solutions):
-                if idx < len(all_solutions):
-                    all_solutions[idx] = solution
-            
-            # Insert large component solutions
-            for idx, solution in zip(large_indices, or_tools_solutions):
-                if idx < len(all_solutions):
-                    all_solutions[idx] = solution
+            # Handle edge cases where indices might be empty
+            if not small_indices and not large_indices:
+                print("WARNING: No indices found for components, returning empty solution")
+                all_solutions = []
+            else:
+                # Insert small component solutions
+                for i, idx in enumerate(small_indices):
+                    if i < len(small_solutions) and idx < len(all_solutions):
+                        all_solutions[idx] = small_solutions[i]
+                
+                # Insert large component solutions
+                for i, idx in enumerate(large_indices):
+                    if i < len(or_tools_solutions) and idx < len(all_solutions):
+                        all_solutions[idx] = or_tools_solutions[i]
             
             # If we processed all components with Rust (no large components),
             # ensure the solutions array is properly filled
@@ -457,7 +593,7 @@ class MazeSolver:
                 if None in all_solutions:
                     print("Warning: Some solutions are None, reconstructing array")
                     # Create a mapping of original indices to solutions
-                    solution_map = {idx: sol for idx, sol in zip(small_indices, small_solutions)}
+                    solution_map = {idx: sol for idx, sol in zip(small_indices, small_solutions) if idx < len(all_solutions)}
                     # Rebuild the all_solutions array
                     all_solutions = [solution_map.get(i, []) for i in range(len(data['largeComponents']))]
             
@@ -508,6 +644,39 @@ class MazeSolver:
             # Initial cancellation check
             check_cancelled()
             
+            # Validate the json_data before passing to Rust
+            try:
+                # Parse and validate the json data
+                parsed_data = json.loads(json_data)
+                if not isinstance(parsed_data, dict):
+                    raise ValueError(f"Expected dictionary, got {type(parsed_data).__name__}")
+                
+                if 'largeComponents' not in parsed_data:
+                    raise ValueError("Missing 'largeComponents' in data")
+                
+                if not isinstance(parsed_data['largeComponents'], list):
+                    raise ValueError(f"'largeComponents' must be a list, got {type(parsed_data['largeComponents']).__name__}")
+                
+                if not parsed_data['largeComponents']:
+                    raise ValueError("'largeComponents' list is empty")
+                
+                # Ensure each component is valid
+                for i, component in enumerate(parsed_data['largeComponents']):
+                    if not isinstance(component, dict):
+                        raise ValueError(f"Component {i} is not a dictionary")
+                    
+                    if not component:
+                        raise ValueError(f"Component {i} is empty")
+                    
+                    # Check that keys and values are as expected
+                    for key, value in component.items():
+                        if not isinstance(value, list):
+                            raise ValueError(f"Component {i}, neighbors of node {key} is not a list")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON: {str(e)}")
+            except ValueError as e:
+                raise ValueError(f"Invalid data structure: {str(e)}")
+            
             # Use ThreadPoolExecutor for the CPU-bound Rust code
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 # Create a task that periodically checks if the client is still connected
@@ -515,10 +684,66 @@ class MazeSolver:
                     cancel_checker = asyncio.create_task(self._periodic_cancel_check(websocket))
                 
                 try:
+                    # Import the Rust function just-in-time to handle import errors gracefully
+                    try:
+                        # We need to import this here to avoid problems with circular imports
+                        import importlib.util
+                        spec = importlib.util.find_spec("rust_maze_solver")
+                        if spec is None:
+                            print("rust_maze_solver module not found. Using fallback to OR-Tools...")
+                            
+                            # Extract components from the JSON data
+                            components = parsed_data['largeComponents']
+                            indices = list(range(len(components)))
+                            
+                            # Use OR-Tools as a fallback
+                            return await self._run_ortools_solver(components, indices, {}, websocket)
+                        
+                        # If rust_maze_solver is found, import it
+                        rust_module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(rust_module)
+                        
+                        if not hasattr(rust_module, "process_and_solve_maze"):
+                            print("rust_maze_solver module found but process_and_solve_maze function is missing")
+                            raise ImportError("process_and_solve_maze function not found in rust_maze_solver module")
+                        
+                        rust_solver = rust_module.process_and_solve_maze
+                        
+                        # Debug print to confirm we found the right module and function
+                        print(f"Successfully imported Rust solver: {rust_solver}")
+                    except ImportError as e:
+                        print(f"Error importing Rust solver: {str(e)}")
+                        print(f"Python path: {os.environ.get('PYTHONPATH', 'Not set')}")
+                        print(f"Current directory: {os.getcwd()}")
+                        
+                        # List available modules to debug
+                        print("Attempting to find rust_maze_solver module...")
+                        import pkgutil
+                        all_modules = [m.name for m in pkgutil.iter_modules()]
+                        if 'rust_maze_solver' in all_modules:
+                            print("'rust_maze_solver' module found in available modules!")
+                        else:
+                            print("'rust_maze_solver' module NOT found in available modules.")
+                            print(f"Available modules that might be relevant: {[m for m in all_modules if 'maze' in m or 'rust' in m]}")
+                            
+                            # Extract components from the JSON data
+                            components = parsed_data['largeComponents']
+                            indices = list(range(len(components)))
+                            
+                            # Use OR-Tools as a fallback
+                            return await self._run_ortools_solver(components, indices, {}, websocket)
+                        
+                        raise ValueError(f"Rust solver module not available: {str(e)}")
+                    
+                    # Execute the Rust solver with the validated data
                     result = await asyncio.wait_for(
-                        loop.run_in_executor(pool, lambda: process_and_solve_maze(json_data)),
+                        loop.run_in_executor(pool, lambda: rust_solver(json_data)),
                         timeout=360  # 6 minute timeout
                     )
+                    
+                    # Check that the result is valid
+                    if not isinstance(result, list):
+                        raise ValueError(f"Expected list result from Rust solver, got {type(result).__name__}")
                     
                     # Final cancellation check before returning
                     check_cancelled()
@@ -563,6 +788,49 @@ class MazeSolver:
     async def _run_ortools_solver(self, components, indices, dimensions, websocket=None):
         """Run OR-Tools solver asynchronously with cancellation support"""
         try:
+            # Validate inputs
+            if components is None:
+                print("WARNING: components is None!")
+                return []
+                
+            if not components:
+                print("WARNING: components list is empty!")
+                return []
+                
+            if indices is None:
+                print("WARNING: indices is None!")
+                return []
+                
+            if not indices:
+                print("WARNING: indices list is empty!")
+                return []
+                
+            # Validate each component before processing
+            valid_components = []
+            valid_indices = []
+            
+            for i, (idx, component) in enumerate(zip(indices, components)):
+                if component is None:
+                    print(f"WARNING: Component at position {i} (index {idx}) is None, skipping")
+                    continue
+                    
+                if not isinstance(component, dict):
+                    print(f"WARNING: Component at position {i} (index {idx}) is not a dictionary, skipping")
+                    continue
+                    
+                if not component:
+                    print(f"WARNING: Component at position {i} (index {idx}) is empty, skipping")
+                    continue
+                    
+                valid_components.append(component)
+                valid_indices.append(idx)
+            
+            if not valid_components:
+                print("WARNING: No valid components to process!")
+                return []
+            
+            print(f"OR-Tools processing {len(valid_components)} valid components")
+            
             # Create a thread pool for parallel processing
             results = []
             cancel_event = threading.Event()  # For signaling cancellation to threads
@@ -570,7 +838,7 @@ class MazeSolver:
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 # Create futures for each component
                 futures = []
-                for idx, component in zip(indices, components):
+                for idx, component in zip(valid_indices, valid_components):
                     futures.append(executor.submit(
                         self._solve_component, component, idx, dimensions, cancel_event
                     ))
@@ -590,14 +858,34 @@ class MazeSolver:
                         print(f"Error in OR-Tools component: {str(e)}")
                         results.append([])  # Add an empty path for this component
             
-            return results
+            # Make sure we have the right number of results
+            while len(results) < len(valid_components):
+                results.append([])
+                
+            # Map results back to original indices
+            final_results = []
+            for i in range(max(indices) + 1 if indices else 0):
+                if i in valid_indices:
+                    idx = valid_indices.index(i)
+                    if idx < len(results):
+                        final_results.append(results[idx])
+                    else:
+                        final_results.append([])
+                else:
+                    final_results.append([])
+                    
+            return final_results
+            
         except asyncio.CancelledError:
             print("OR-Tools solver cancelled")
-            cancel_event.set()  # Signal all threads to stop
+            if 'cancel_event' in locals():
+                cancel_event.set()  # Signal all threads to stop
             raise
         except Exception as e:
             print(f"Error in OR-Tools solver: {str(e)}")
-            raise
+            import traceback
+            traceback.print_exc()
+            return []  # Return empty results on error
         
     def _solve_component(self, adjacency_dict, component_idx, dimensions=None, cancel_event=None):
         """Solve a single component with cancellation support"""

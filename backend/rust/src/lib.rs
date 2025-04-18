@@ -9,8 +9,8 @@ use rust_maze_solver::process_and_solve_maze;
 
 /// A Python module implemented in Rust.
 #[pymodule]
-#[pyo3(name = "maze_solver")]
-fn maze_solver(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pyo3(name = "rust_maze_solver")]
+fn rust_maze_solver_module(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
      // Initialize rayon's thread pool
     rayon::ThreadPoolBuilder::new()
         .num_threads(rayon::current_num_threads())
@@ -32,8 +32,8 @@ mod tests {
     #[test]
     fn test_module_initialization() {
         Python::with_gil(|py| {
-            let m = PyModule::new(py, "maze_solver").unwrap();
-            maze_solver(py, &m).unwrap();
+            let m = PyModule::new(py, "rust_maze_solver").unwrap();
+            rust_maze_solver_module(py, &m).unwrap();
             
             // Verify the function is available
             assert!(m.getattr("process_and_solve_maze").is_ok());

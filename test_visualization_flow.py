@@ -34,8 +34,8 @@ SAMPLE_MAZE_DATA = {
         }
     ],
     "dimensions": {
-        "rows": 3,
-        "cols": 3
+        "rows": 2,
+        "cols": 5
     }
 }
 

@@ -87,7 +87,16 @@ async def websocket_endpoint(websocket: WebSocket):
         # Get and parse the data
         raw_data = await websocket.receive_text()
         print(f"Received data: {raw_data[:100]}...")  # Print first 100 chars
-        data = json.loads(raw_data)
+        
+        try:
+            data = json.loads(raw_data)
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error: {str(e)}")
+            await websocket.send_json({
+                "type": "internal_error",
+                "error": f"Invalid JSON format: {str(e)}"
+            })
+            return
         
         # Handle test messages
         if isinstance(data, dict) and data.get('type') == 'test':
@@ -140,18 +149,15 @@ async def websocket_endpoint(websocket: WebSocket):
         # Client disconnected, cancel any running tasks for this websocket
         print("WebSocket disconnected")
         await app.state.maze_solver.cancel_tasks_for_websocket(websocket)
-    except json.JSONDecodeError as e:
-        print(f"JSON parsing error: {str(e)}")
-        await websocket.send_json({
-            "type": "internal_error",
-            "error": f"Invalid JSON format: {str(e)}"
-        })
     except Exception as e:
         print(f"Error details: {type(e)}: {str(e)}")
-        await websocket.send_json({
-            "type": "internal_error",
-            "error": f"An unexpected error occurred: {str(e)}"
-        })
+        try:
+            await websocket.send_json({
+                "type": "internal_error",
+                "error": f"An unexpected error occurred: {str(e)}"
+            })
+        except:
+            print(f"Could not send error message: {str(e)}")
     finally:
         try:
             print(f"Closing WebSocket connection for session: {session_id}")

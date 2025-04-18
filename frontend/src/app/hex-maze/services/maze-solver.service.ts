@@ -327,6 +327,8 @@ private async solveRemotely(
   console.log('Attempting to connect to WebSocket at:', environment.websocketUrl);
   console.log('Current origin:', window.location.origin);
   console.log('Protocol:', window.location.protocol);
+  
+  // Create WebSocket without any extra parameters that might cause issues
   const ws = new WebSocket(environment.websocketUrl);
 
   return new Promise((resolve, reject) => {
@@ -363,7 +365,7 @@ private async solveRemotely(
       }, 30000); // 30 seconds timeout
 
       try {
-        ws.send(JSON.stringify(payload));
+        ws.send(payload);
         console.log('Payload sent successfully');
       } catch (err) {
         console.error('Error sending payload:', err);
@@ -410,6 +412,17 @@ private async solveRemotely(
             return;
           }
           throw new Error(`Invalid paths data in results: ${typeof data.paths}`);
+        }
+
+        // Handle solution message directly from _solve_maze_internal
+        if (typeof data === 'object' && data !== null && 'type' in data && data.type === 'solution' && 'data' in data) {
+          if (Array.isArray(data.data)) {
+            clearTimeout(timeout);
+            ws.close();
+            resolve(data.data);
+            return;
+          }
+          throw new Error(`Invalid solution data: ${typeof data.data}`);
         }
         
         // If we receive an array directly (old server format), use it
