@@ -59,7 +59,7 @@ async def test_visualization_flow():
         
         async with websockets.connect(
             WS_URL,
-            extra_headers=headers,
+            additional_headers=headers,
             ping_interval=30,  # Send a ping every 30 seconds
             ping_timeout=20,   # Wait 20 seconds for pong response
             close_timeout=10   # Give 10 seconds for graceful closure

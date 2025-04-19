@@ -19,9 +19,7 @@ from typing import Union
 import numpy as np
 import importlib.util
 
-# Don't import here, instead import dynamically to avoid circular imports
-# Import only when needed in _run_rust_solver
-# from rust_maze_solver import process_and_solve_maze as rust_solver
+# Removed commented-out static import of rust_maze_solver
 
 GraphLike = Union[nx.Graph, nx.DiGraph, nx.MultiGraph, dict[str, list[str]]]
 
@@ -429,7 +427,9 @@ class MazeSolver:
                     or_tools_solutions = [[] for _ in large_components]
                 
                 # --- Fallback mechanisms ---
-                # If Rust solver failed, try OR-Tools on small components
+                # If Rust solver failed during execution (after successful import),
+                # try OR-Tools on the small components as a fallback.
+                # Note: If the *initial* import failed, components were already moved.
                 if rust_failed and small_components:
                     print("Trying OR-Tools as fallback for Rust solver...")
                     fallback_task = asyncio.create_task(self._run_ortools_solver(
@@ -1427,7 +1427,8 @@ class MazeSolver:
             # Generate the visualization synchronously in this function
             # to ensure it's completed before the connection closes
             print(f"Creating visualization for {len(components_data)} components...")
-            visualizer = GraphVisualizer()
+            # Use the instance visualizer created during __init__
+            visualizer = self.visualizer 
             
             # Use executor to avoid blocking the event loop with CPU-bound task
             loop = asyncio.get_running_loop()
