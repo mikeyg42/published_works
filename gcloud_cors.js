@@ -12,13 +12,11 @@ const bucketName = 'resume_page';
 
 // The origins for this CORS config to allow requests from
 const origins = [
-  'http://localhost:4200',
-  'http://localhost:4000',
-  'http://localhost:8000',
+  'https://localhost:4200',
+  'https://localhost:4000',
+  'https://localhost:8000',
   'https://michaelglendinning.com',
-  'https://www.michaelglendinning.com',
   'wss://michaelglendinning.com',
-  'wss://www.michaelglendinning.com'
 ];
 
 // The response headers to share across origins

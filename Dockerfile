@@ -74,8 +74,6 @@ COPY --from=builder /opt/venv /opt/venv
 # Copy the application code needed at runtime
 # Adjust this to copy only what's necessary (e.g., the 'backend' directory)
 COPY --from=builder --chown=appuser:appuser /app/backend ./backend
-# If main.py is outside 'backend', copy it too:
-# COPY --from=builder --chown=appuser:appuser /app/main.py ./
 
 # Activate virtual environment
 ENV PATH="/opt/venv/bin:$PATH"

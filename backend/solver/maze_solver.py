@@ -24,12 +24,25 @@ import importlib.util
 GraphLike = Union[nx.Graph, nx.DiGraph, nx.MultiGraph, dict[str, list[str]]]
 
 class MazeSolver:
-    def __init__(self, output_dir: str = "maze_visualizations"):
+    def __init__(self, output_dir: str = "maze_viz"):
         self._image_counter = 0
         self._output_dir = output_dir
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir, exist_ok=True)
-        self.visualizer = GraphVisualizer(output_dir=output_dir)
+        
+        # Only create the directory if not running in Cloud Run (or similar env)
+        is_cloud_run = os.environ.get("CLOUD_RUN", "false").lower() == "true"
+        # Only attempt to create the directory if NOT in Cloud Run
+        if not is_cloud_run:
+            # Check if the specific output_dir exists and create if needed
+            if not os.path.exists(self._output_dir):
+                try:
+                    os.makedirs(self._output_dir, exist_ok=True)
+                    print(f"Created output directory: {self._output_dir}")
+                except OSError as e:
+                    print(f"Error creating directory {self._output_dir}: {e}")
+                    self._output_dir = "tmp"
+                    pass
+ 
+        self.visualizer = GraphVisualizer(output_dir=self._output_dir, in_memory=is_cloud_run)
         
         # Track active solving tasks
         self._active_tasks = weakref.WeakValueDictionary()
@@ -42,11 +55,8 @@ class MazeSolver:
         # Initialize other variables
         self._cancel_events = {}
         self._cancel_locks = {}
-        self._thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        self._thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=int(os.environ.get("CPU_LIMIT", 4)))
         self._thread_pool_lock = threading.Lock()
-        
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
     
     async def start_queue_processor(self):
         """Start the queue processor if it's not already running"""

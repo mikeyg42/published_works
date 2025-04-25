@@ -28,14 +28,14 @@ origins = [
     "https://michaelglendinning.com",
     
     # Development - common local ports
-    "http://localhost:4200",    # Angular default
-    "http://localhost:3000",    # React/Next.js default
-    "http://localhost:8000",    # FastAPI/Django default
-    "http://localhost:8080",    # General development
-    "http://127.0.0.1:4200",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:8000",
-    "http://127.0.0.1:8080",
+    "https://localhost:4200",    # Angular default
+    "https://localhost:3000",    # React/Next.js default
+    "https://localhost:8000",    # FastAPI/Django default
+    "https://localhost:8080",    # General development
+    "https://127.0.0.1:4200",
+    "https://127.0.0.1:3000",
+    "https://127.0.0.1:8000",
+    "https://127.0.0.1:8080",
 ]
 
 # Add CORS middleware
@@ -50,7 +50,7 @@ app.add_middleware(
 # Add Trusted Host middleware
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["*"]
+    allowed_hosts=["michaelglendinning.com"]
 )
 
 # Include the router
@@ -63,6 +63,10 @@ app.state.maze_solver = MazeSolver()
 async def health_check():
     """Simple health check endpoint."""
     return {"status": "healthy"}
+
+@app.get("/test-websocket-health")
+async def test_websocket_health():
+    return {"status": "websocket_route_available", "timestamp": datetime.datetime.now().isoformat()}
 
 @app.get("/test-websocket")
 async def test_websocket():

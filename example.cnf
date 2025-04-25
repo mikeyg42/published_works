@@ -1,0 +1,11 @@
+[req]
+distinguished_name = empty_distinguished_name
+
+[empty_distinguished_name]
+# Kept empty to allow setting via -subj command-line argument.
+
+[ca_exts]
+basicConstraints=critical,CA:TRUE
+keyUsage=keyCertSign
+extendedKeyUsage=clientAuth
+

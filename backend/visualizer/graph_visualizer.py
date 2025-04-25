@@ -18,10 +18,9 @@ class GraphVisualizer:
 
     """
     
-    def __init__(self, output_dir: str = "visualizations"):
+    def __init__(self, output_dir, in_memory):
+        self.in_memory = in_memory
         self.output_dir = output_dir
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir, exist_ok=True)
         
         # Gradient colormap for paths
         self.path_cmap = LinearSegmentedColormap.from_list(
@@ -115,9 +114,7 @@ class GraphVisualizer:
                 if row % 2 == 1:  # Odd-indexed row
                     x += odd_row_x_offset
                 
-                # Store position
-                # Note that we invert the y-coordinate to have node #1 at the top-left
-                # (in matplotlib, lower y values are at the top of the plot)
+                # Store position - we are inverting the y-coordinate to have node #1 at the top-left (maybe unnecessary)
                 positions[str(node_id)] = np.array([x, -y])
                 
         except ValueError:
@@ -599,11 +596,18 @@ class GraphVisualizer:
         return filepath
     
     # Helper for saving figures
-    def _save_figure(self, filename: str) -> str:
-        """Helper method to save a figure to the output directory."""
-        filepath = os.path.join(self.output_dir, filename)
-        plt.savefig(filepath)
-        return filepath
+    def _save_figure(self, filename):
+        if self.in_memory:
+            # Return BytesIO instead of saving to disk
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png')
+            buf.seek(0)
+            return buf
+        else:
+            # Original disk-based code
+            filepath = os.path.join(self.output_dir, filename)
+            plt.savefig(filepath)
+            return filepath
     
 # Note: The following methods were removed as they're not used by the core functionality:
 # - maintain_clockwise_order: Not needed for component visualization

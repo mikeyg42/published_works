@@ -1,0 +1,48 @@
+creationTimestamp: '2024-10-31T06:57:09.189-07:00'
+defaultCustomErrorResponsePolicy:
+  errorResponseRules:
+  - matchResponseCodes:
+    - '404'
+    - 5xx
+    - '401'
+    - '402'
+    - '400'
+    path: /resume_page/error.html
+  errorService: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/backendBuckets/resume-bucket
+defaultService: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/backendBuckets/resume-bucket
+fingerprint: ohu5lCIXyVQ=
+
+# Host Rules
+hostRules:
+# Rule for www subdomain
+- hosts:
+  - www.michaelglendinning.com
+  pathMatcher: redirect-to-naked
+
+# Rule for naked domain
+- hosts:
+  - michaelglendinning.com
+  pathMatcher: main-routes
+
+id: 5495042429323981402
+kind: compute#urlMap
+name: resume1
+
+# Path Matchers
+pathMatchers:
+# Routes requests to appropriate backends
+- name: main-routes
+  defaultService: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/backendBuckets/resume-bucket
+  pathRules:
+  - paths:
+    - /api/*
+    service: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/backendServices/maze-api-backend
+
+# Redirects www to naked domain
+- defaultUrlRedirect:
+    hostRedirect: michaelglendinning.com
+    redirectResponseCode: MOVED_PERMANENTLY_DEFAULT
+    stripQuery: true
+  name: redirect-to-naked
+
+selfLink: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/urlMaps/resume1

@@ -42,46 +42,21 @@ async def solve_maze(data: LargeMazeData):
         
 @router.websocket("/ws/solve")
 async def websocket_solve_maze(websocket: WebSocket):
-    """WebSocket endpoint for solving mazes with real-time updates"""
+    """WebSocket endpoint that redirects to the main /maze-solver endpoint"""
     await websocket.accept()
     try:
-        # Receive the JSON data from the client
-        data = await websocket.receive_json()
-        
-        # Convert to proper model if needed
-        maze_data = LargeMazeData.model_validate(data)
-        json_data = json.dumps(maze_data.model_dump())
-        
-        # Send acknowledgment that processing is starting
+        # Send a message indicating the endpoint has moved
         await websocket.send_json({
-            "type": "status",
-            "message": "Processing started"
+            "type": "endpoint_moved",
+            "message": "This endpoint is deprecated. Please connect to /maze-solver instead.",
+            "new_endpoint": "/maze-solver"
         })
-    
-        # For now, we'll just send the final solution
-        solutions = solver.process_and_solve_maze(json_data)
-        
-        # Send the solution
-        await websocket.send_json(SolutionResponse(
-            type="solution",
-            data=solutions
-        ).model_dump())
-        
     except WebSocketDisconnect:
-        # Client disconnecteda
         pass
-    except ValueError as ve:
-        # Validation error
-        await websocket.send_json(ErrorResponse(
-            type="validation_error",
-            error=str(ve)
-        ).model_dump())
     except Exception as e:
-        # Unexpected error
-        await websocket.send_json(ErrorResponse(
-            type="internal_error",
-            error=f"An unexpected error occurred: {str(e)}"
-        ).model_dump())
+        print(f"Error in deprecated WebSocket endpoint: {str(e)}")
+    finally:
+        await websocket.close()
         
 @router.get("/examples")
 async def get_example_mazes():
@@ -118,7 +93,7 @@ async def get_latest_visualization(session_id: str):
     """
     try:
         # Get bucket name from environment or use default
-        bucket_name = os.environ.get("GCS_BUCKET_NAME", "maze-solver-visualizations")
+        bucket_name = os.environ.get("GCS_BUCKET_NAME", "resume_page")
         
         print(f"Fetching latest visualization for session: {session_id}")
         
