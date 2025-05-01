@@ -3,16 +3,12 @@
   <div class="loading-overlay" *ngIf="isLoading">
     <div class="spinner"></div>
   </div>
-  <div #mazeCanvas class="maze-canvas" [style.min-width.px]="canvasWidth"></div>
+  <div #mazeCanvas class="maze-canvas debug-border" [style.min-width.px]="canvasWidth"></div>
   
   <div class="controls" *ngIf="initialized">
     <button (click)="onClick()" [disabled]="isAnimating || isLoading" aria-label="Regenerate maze">
       {{ isLoading ? 'Generating...' : 'Regenerate Map' }}
     </button>
-    <label class="toggle-label">
-      <input type="checkbox" [(ngModel)]="useLocalGeneration">
-      Use local generation
-    </label>
   </div>
   
   <div class="status" *ngIf="statusMessage">{{ statusMessage }}</div>

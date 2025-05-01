@@ -6,7 +6,6 @@
   },
   "include": [
     "src/main.ts",
-    "src/server.ts",
     "src/**/*.prod.ts",
     "src/**/*.ts",
     "src/**/*.d.ts",

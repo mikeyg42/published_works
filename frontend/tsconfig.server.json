@@ -8,7 +8,7 @@
     "types": ["node"],
     "noEmit": false
   },
-  "files": ["src/server.ts"],
+  "files": [],
   "exclude": [
     "src/main.ts",
     "src/test.ts",

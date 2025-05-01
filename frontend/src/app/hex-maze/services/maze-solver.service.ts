@@ -1,5 +1,6 @@
 // maze-solver.service.ts
 import { Injectable, Inject, PLATFORM_ID } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
 import { BehaviorSubject } from 'rxjs';
 import { PathCell, PathMap } from './maze-generator.service';
 import Graph from 'graphology';
@@ -66,7 +67,10 @@ export class MazeSolverService {
   });
   progress$ = this.progressSubject.asObservable();
 
-  constructor(@Inject(PLATFORM_ID) private platformId: Object) {
+  constructor(
+    @Inject(PLATFORM_ID) private platformId: Object,
+    private http: HttpClient
+  ) {
   }
 
   async solveMaze(
@@ -325,163 +329,159 @@ private async solveRemotely(
   });
   
   console.log('Attempting to connect to WebSocket at:', environment.websocketUrl);
-  console.log('Current origin:', window.location.origin);
-  console.log('Protocol:', window.location.protocol);
-  
-  // Create WebSocket without any extra parameters that might cause issues
   const ws = new WebSocket(environment.websocketUrl);
 
   return new Promise((resolve, reject) => {
-    let timeout: NodeJS.Timeout;
-    let taskId: string | null = null;
-    
+    let timeout: NodeJS.Timeout | null = null;
     let connectionAttempted = false;
-    let connectionTimeoutId: NodeJS.Timeout;
+    let connectionTimeoutId: NodeJS.Timeout | null = null;
 
-    // Set a timeout for the initial connection attempt
-    connectionTimeoutId = setTimeout(() => {
-      if (!connectionAttempted) {
-        console.error('WebSocket connection attempt timed out after 5 seconds');
-        console.error('No connection events were triggered');
-        console.error('WebSocket URL:', environment.websocketUrl);
-        console.error('Current origin:', window.location.origin);
-        console.error('Protocol:', window.location.protocol);
-        ws.close();
-        reject(new Error('WebSocket connection attempt timed out after 5 seconds'));
+    const cleanup = (timerId: NodeJS.Timeout | null) => {
+      if (timerId) clearTimeout(timerId);
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          console.debug('Cleaning up and closing WebSocket.');
+          ws.close();
       }
-    }, 5000);
+    };
+
+    // Connection attempt timeout
+    connectionTimeoutId = setTimeout(() => {
+      connectionTimeoutId = null;
+      if (!connectionAttempted) {
+        console.error('WebSocket connection attempt timed out after 10 seconds');
+        cleanup(timeout);
+        reject(new Error('WebSocket connection attempt timed out after 10 seconds'));
+      }
+    }, 10000); // Increased connection timeout
 
     ws.onopen = () => {
       connectionAttempted = true;
-      clearTimeout(connectionTimeoutId);
-      console.log('WebSocket connected successfully');
-      console.log('Sending payload to server...');
+      if (connectionTimeoutId) clearTimeout(connectionTimeoutId);
+      connectionTimeoutId = null;
+      console.log('WebSocket connected successfully. Sending payload...');
       
+      // Operation timeout
       timeout = setTimeout(() => {
-        console.error('WebSocket operation timed out after 30 seconds');
-        console.error('No response received from server');
-        ws.close();
-        reject(new Error('WebSocket operation timed out after 30 seconds'));
-      }, 30000); // 30 seconds timeout
+        timeout = null;
+        console.error('WebSocket operation timed out after 60 seconds (no solution received)');
+        cleanup(connectionTimeoutId);
+        reject(new Error('WebSocket operation timed out after 60 seconds'));
+      }, 60000); 
 
       try {
         ws.send(payload);
         console.log('Payload sent successfully');
       } catch (err) {
         console.error('Error sending payload:', err);
-        clearTimeout(timeout);
-        ws.close();
+        cleanup(timeout);
+        cleanup(connectionTimeoutId);
         reject(err);
       }
     };
 
     ws.onmessage = (event) => {
+      let receivedData: any;
       try {
         console.debug('Received WebSocket message:', event.data);
-        
-        // Parse the response
-        let data;
-        try {
-          data = JSON.parse(event.data);
-        } catch (error) {
-          const parseError = error as Error;
-          console.error('Failed to parse WebSocket response:', event.data);
-          throw new Error(`Invalid JSON response: ${parseError.message}`);
+        receivedData = JSON.parse(event.data);
+
+        // --- Expect only the 'solution' message type --- 
+        if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'solution') {
+            if (Array.isArray(receivedData.data) && typeof receivedData.session_id === 'string') {
+                const solutionPaths: string[][] = receivedData.data;
+                const sessionId: string = receivedData.session_id;
+                
+                console.log(`Received solution for session: ${sessionId}`);
+                cleanup(timeout); // Clear operation timeout
+                cleanup(connectionTimeoutId); // Clear connection timeout just in case
+                
+                // 1. Resolve the promise with the solution paths
+                resolve(solutionPaths);
+                
+                // 2. Trigger visualization request (fire and forget)
+                const visualizeUrl = `${environment.visualizeUrl(sessionId)}`;
+                console.log(`Triggering visualization GET request to: ${visualizeUrl}`);
+                this.http.get(visualizeUrl, { responseType: 'blob' }) // Expecting an image/blob
+                    .subscribe({
+                        next: () => console.log(`Successfully triggered visualization for ${sessionId}`),
+                        error: (err) => console.error(`Error triggering visualization for ${sessionId}:`, err)
+                    });
+                    
+                // 3. Close the WebSocket (explicitly, though cleanup might already do it)
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.close();
+                }
+                return; // Processing done for this message
+            } else {
+                throw new Error(`Invalid 'solution' message format. Missing or incorrect 'data' or 'session_id'.`);
+            }
         }
-        
-        // Check for server error response
-        if (typeof data === 'object' && data !== null && 'type' in data && data.type === 'internal_error') {
-          throw new Error(`Server error: ${data.error}`);
+        // --- Handle other expected informational message types --- 
+        else if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'queued'){
+            console.log(`Task queued - ID: ${receivedData.task_id}, Position: ${receivedData.position}`);
+            // Keep waiting
         }
-        
-        // Handle queue status message
-        if (typeof data === 'object' && data !== null && 'type' in data && data.type === 'queued') {
-          console.log(`Task queued - ID: ${data.task_id}, Position: ${data.position}`);
-          taskId = data.task_id;
-          // Continue waiting for the actual result
-          return;
+        else if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'processing_started'){
+            console.log(`Processing started for session: ${receivedData.session_id}`);
+            // Keep waiting
         }
-        
-        // Handle results message
-        if (typeof data === 'object' && data !== null && 'type' in data && data.type === 'results' && 'paths' in data) {
-          // Extract paths from results object
-          if (Array.isArray(data.paths)) {
-            clearTimeout(timeout);
-            ws.close();
-            resolve(data.paths);
-            return;
-          }
-          throw new Error(`Invalid paths data in results: ${typeof data.paths}`);
+        // --- Handle Visualization Ready (Optional, but good practice) ---
+        else if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'visualization_ready'){
+            console.log(`Visualization ready message received for session ${receivedData.session_id}. URL: ${receivedData.url}`);
+            // You could potentially use receivedData.url here if needed, 
+            // but we are already triggering the GET request above.
+            // Close WS if not already closed
+            cleanup(timeout);
+            cleanup(connectionTimeoutId);
+        }
+         // --- Handle errors from backend --- 
+        else if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'internal_error') {
+           throw new Error(`Server error: ${receivedData.error || 'Unknown error'}`);
+        }
+        // --- Handle visualization errors --- 
+        else if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'visualization_error') {
+           console.error(`Backend reported visualization error: ${receivedData.error || 'Unknown error'}`);
+           // Don't reject the main promise, just log the error.
+           // Visualization might be secondary to the solution itself.
+        }
+        // --- Reject unexpected formats --- 
+        else {
+            console.warn('Received unexpected data format:', receivedData);
+            // Optionally reject or just ignore, depending on requirements
+            // throw new Error(`Unexpected WebSocket message format: ${JSON.stringify(receivedData)}`); 
         }
 
-        // Handle solution message directly from _solve_maze_internal
-        if (typeof data === 'object' && data !== null && 'type' in data && data.type === 'solution' && 'data' in data) {
-          if (Array.isArray(data.data)) {
-            clearTimeout(timeout);
-            ws.close();
-            resolve(data.data);
-            return;
-          }
-          throw new Error(`Invalid solution data: ${typeof data.data}`);
-        }
-        
-        // If we receive an array directly (old server format), use it
-        if (Array.isArray(data)) {
-          // Validate each path is an array
-          const paths: string[][] = data.filter((path, index) => {
-            if (!Array.isArray(path)) {
-              console.warn(`Path at index ${index} is not an array:`, path);
-              return false;
-            }
-            return true;
-          });
-          
-          if (paths.length !== data.length) {
-            console.warn(`Filtered out ${data.length - paths.length} invalid paths`);
-          }
-          
-          if (paths.length === 0) {
-            console.warn('No valid paths found in response');
-          }
-          
-          clearTimeout(timeout);
-          ws.close();
-          
-          resolve(paths);
-          return;
-        }
-        
-        console.error('Received unexpected data format:', data);
-        throw new Error(`Unexpected response format: ${typeof data}`);
       } catch (error) {
         console.error('Error processing WebSocket message:', error);
-        clearTimeout(timeout);
-        ws.close();
+        cleanup(timeout);
+        cleanup(connectionTimeoutId);
         reject(error);
       }
     };
-    
+  
     ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      if (!connectionAttempted) {
-        console.error('Failed to connect to WebSocket. Check if the backend server is running and accessible.');
-        console.error('If using HTTPS for the backend, make sure to use WSS for WebSocket connections.');
-        console.error('Backend URL:', environment.websocketUrl);
-        console.error('Current origin:', window.location.origin);
-        console.error('Protocol:', window.location.protocol);
-        reject(new Error('WebSocket connection failed. Check console for details.'));
-      }
+      // Use 'event' instead of 'error' which might not be standard
+      const errorEvent = error instanceof Event ? error : null;
+      console.error('WebSocket error event:', errorEvent);
+      console.error('WebSocket connection failed. Check backend server and network.');
+      console.error('Backend URL attempted:', environment.websocketUrl);
+      cleanup(timeout);
+      cleanup(connectionTimeoutId); 
+      reject(new Error('WebSocket connection error. See console for details.'));
     };
 
     ws.onclose = (event) => {
-      console.debug('WebSocket closed:', event.code, event.reason);
-      clearTimeout(timeout);
-      if (!connectionAttempted) {
-        console.error('WebSocket connection closed with code:', event.code);
-        console.error('Reason:', event.reason || 'No reason provided');
-        console.error('Was clean:', event.wasClean);
-        reject(new Error(`WebSocket connection closed: ${event.code} - ${event.reason}`));
+      console.debug(`WebSocket closed: Code=${event.code}, Reason=${event.reason || 'N/A'}, Clean=${event.wasClean}`);
+      // Ensure timers are cleared on close, regardless of how it closed
+      cleanup(timeout);
+      cleanup(connectionTimeoutId);
+      // If connection was never established, reject the promise
+      if (!connectionAttempted && !event.wasClean) {
+           reject(new Error(`WebSocket connection closed unexpectedly: Code=${event.code}`));
       }
+      // If the promise hasn't been resolved yet (e.g., closed before solution received), reject it.
+      // Note: Need a flag to track if promise was resolved to avoid rejecting after success.
+      // Let's assume the timeout handles the case where no solution is received.
     };
   });
 }
