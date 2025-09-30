@@ -8,6 +8,8 @@ import VG, {
   VGTools,
 } from '../../../assets/js/hex-grid/index';
 import * as THREE from 'three';
+import WebGPURenderer from 'three/src/renderers/webgpu/WebGPURenderer.js'; 
+
 import * as TWEEN from '@tweenjs/tween.js';
 
 
@@ -15,6 +17,8 @@ declare global {
   interface Window {
     TWEEN: typeof TWEEN;
     vg: VG;
+    THREE: typeof THREE;
+    WebGPURenderer: typeof WebGPURenderer;
   }
 }
 
@@ -25,9 +29,10 @@ export class VonGridService {
   constructor() {
      window.TWEEN = TWEEN;
      window.vg = VG;
+     window.THREE = THREE;
   }
 
-  public renderer?: THREE.WebGLRenderer | THREE.WebGPURenderer;
+  public renderer?: THREE.WebGLRenderer | WebGPURenderer;
   // Indicates whether the bundled script has been loaded.
   private scriptsLoaded = false;
 
@@ -88,7 +93,7 @@ export class VonGridService {
   /**
    * Initialize the Loader.
    */
-  public initLoader(renderer: THREE.WebGLRenderer | THREE.WebGPURenderer): void {
+  public initLoader(renderer: THREE.WebGLRenderer |WebGPURenderer): void {
     if (!this.isLoaded() || !window.vg.Loader) {
       throw new Error('Loader not available. Ensure the bundled von-grid library is loaded.');
     }
@@ -133,45 +138,16 @@ export class VonGridService {
    */
   public async loadScripts(): Promise<boolean> {
     if (this.scriptsLoaded) return true;
-    
-    // Ensure WebGPURenderer is defined
-    if (typeof navigator !== 'undefined' && !!navigator.gpu && typeof (window as any).WebGPURenderer === 'undefined') {
-      console.log('Defining WebGPURenderer before loading von-grid script');
-      // Create a simple WebGPURenderer class if it doesn't exist
-      (window as any).WebGPURenderer = class WebGPURenderer {
-        constructor(parameters?: any) {
-          console.log('WebGPURenderer constructor called with parameters:', parameters);
-          this.parameters = parameters || {};
-          this.domElement = document.createElement('canvas');
-          this.shadowMap = { enabled: false, type: 0 };
-        }
-        
-        parameters: any;
-        domElement: HTMLCanvasElement;
-        shadowMap: { enabled: boolean; type: number };
-        
-        render(scene: any, camera: any) {
-          console.log('WebGPURenderer render called');
-        }
-        
-        setSize(width: number, height: number, updateStyle?: boolean) {
-          console.log('WebGPURenderer setSize called:', width, height, updateStyle);
-          this.domElement.width = width;
-          this.domElement.height = height;
-          if (updateStyle) {
-            this.domElement.style.width = width + 'px';
-            this.domElement.style.height = height + 'px';
-          }
-        }
-        
-        setClearColor(color: any, alpha?: number) {
-          console.log('WebGPURenderer setClearColor called:', color, alpha);
-        }
-        
-        dispose() {
-          console.log('WebGPURenderer dispose called');
-        }
-      };
+     // Ensure WebGPURenderer is on window if not set in constructor,
+    // or if there's a chance loadScripts is called in a context where constructor might not have set it yet
+    // (though less likely for a root-provided service).
+    // For safety and explicitness *just before loading the script*, this is fine too.
+    // If you've set it reliably in the constructor, this specific one could also be removed.
+    // However, keeping it here ensures it's definitely set *right before* vongrid.bundled.js loads.
+    if (typeof WebGPURenderer !== 'undefined' && !(window as any).WebGPURenderer) {
+        (window as any).WebGPURenderer = WebGPURenderer;
+    } else if (typeof WebGPURenderer === 'undefined') {
+         console.error('CRITICAL: Imported WebGPURenderer is undefined when loadScripts is called.');
     }
     
     const bundledScript = '/assets/js/hex-grid/src/vongrid.bundled.js';

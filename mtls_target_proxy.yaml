@@ -10,4 +10,3 @@ sslCertificates:
 sslPolicy: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/sslPolicies/modern-tls-policy
 tlsEarlyData: DISABLED
 urlMap: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/urlMaps/resume1
-serverTlsPolicy: //networksecurity.googleapis.com/projects/resume-page-430800/locations/global/serverTlsPolicies/resume-page-server-tls-policy

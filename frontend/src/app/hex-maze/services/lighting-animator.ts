@@ -13,6 +13,8 @@ export class LightingAnimator implements AnimationHandler {
   private center: THREE.Vector3 = new THREE.Vector3();
   private size: number = 10;
   private pathTracer: PathTracerService | null = null;
+  private lastUpdateTime: number = 0;
+  private lastPathTracerReset: number = 0;
 
   constructor(
     scene: THREE.Scene, 
@@ -102,6 +104,10 @@ export class LightingAnimator implements AnimationHandler {
   update(time: number, delta: number): void {
     if (!this.isActive || this.spotlights.length === 0) return;
     
+    // Throttle updates to reduce computational overhead
+    if (time - (this.lastUpdateTime || 0) < 16) return; // ~60fps max
+    this.lastUpdateTime = time;
+    
     let sceneChanged = false;
     
     this.spotlights.forEach((spotlight, index) => {
@@ -134,9 +140,10 @@ export class LightingAnimator implements AnimationHandler {
       }
     });
     
-    // Only reset path tracer if scene changes are significant
-    if (sceneChanged && this.pathTracer && (time % 500 < 16)) {
+    // Reduce path tracer resets - only reset every 2 seconds when scene changes
+    if (sceneChanged && this.pathTracer && (time - (this.lastPathTracerReset || 0) > 2000)) {
       this.pathTracer.resetRendering();
+      this.lastPathTracerReset = time;
     }
   }
 

@@ -103,19 +103,9 @@ export class PathAnimator implements IPathAnimator {
       }
     });
     
-    // Reset path tracer to account for new objects
+    // Scene already built in MazeSceneManager.createMaze() - just reset rendering
     if (this.pathTracer) {
       this.pathTracer.resetRendering();
-      // Wait a moment for all path objects to be created
-      setTimeout(() => {
-        this.pathTracer?.buildSceneFromMaze({
-          tiles: this.sceneGroups.tiles.children as THREE.Mesh[],
-          walls: this.sceneGroups.walls.children as THREE.Mesh[],
-          center: new THREE.Vector3(),
-          size: 100,
-          floorY: 0
-        });
-      }, 100);
     }
   }
 
@@ -222,14 +212,8 @@ export class PathAnimator implements IPathAnimator {
       }
       
       this.updateTimeout = setTimeout(() => {
+        // Scene already built in MazeSceneManager.createMaze() - just reset rendering
         this.pathTracer?.resetRendering();
-        this.pathTracer?.buildSceneFromMaze({
-          tiles: this.sceneGroups.tiles.children as THREE.Mesh[],
-          walls: this.sceneGroups.walls.children as THREE.Mesh[],
-          center: new THREE.Vector3(),
-          size: 100,
-          floorY: 0
-        });
         this.updateTimeout = null;
       }, 500);
     }

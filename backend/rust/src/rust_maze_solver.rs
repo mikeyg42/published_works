@@ -365,8 +365,7 @@ fn backtrack_exact_standard_optimized(
 // Data structures for deserialization
 #[derive(Deserialize)]
 struct MazeData {
-    #[serde(rename = "largeComponents")]
-    large_components: Vec<HashMap<String, Vec<String>>>,
+    components: Vec<HashMap<String, Vec<String>>>,
 }
 
 #[pyfunction]
@@ -378,10 +377,10 @@ pub fn process_and_solve_maze(py: Python, data: PyObject) -> PyResult<Vec<Vec<St
         let maze_data: MazeData = serde_json::from_str(&data_str)
             .map_err(|e| PyErr::new::<PyValueError, _>(format!("JSON error: {}", e)))?;
         
-        println!("SOLVING: {} components", maze_data.large_components.len());
+        println!("SOLVING: {} components", maze_data.components.len());
         
         // Process each component in parallel and collect results
-        let results: Vec<Vec<String>> = maze_data.large_components.par_iter()
+        let results: Vec<Vec<String>> = maze_data.components.par_iter()
             .map(|component| {
                 // Sort neighbors clockwise for better performance
                 let sorted_component = sort_neighbors_clockwise(component);

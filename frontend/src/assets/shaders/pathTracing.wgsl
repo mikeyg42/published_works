@@ -16,16 +16,19 @@ struct Uniforms {
 
 // Bindings
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var accumulationTexture: texture_storage_2d<rgba32float, read_write>;
-@group(0) @binding(2) var outputTexture: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(3) var<storage, read> vertices: array<f32>;
-@group(0) @binding(4) var<storage, read> normals: array<f32>;
-@group(0) @binding(5) var<storage, read> materials: array<f32>;
+@group(0) @binding(1) var prevAccumulationTexture: texture_2d<f32>;
+@group(0) @binding(2) var accumulationTexture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(3) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(4) var<storage, read> vertices: array<f32>;
+@group(0) @binding(5) var<storage, read> normals: array<f32>;
+@group(0) @binding(6) var<storage, read> materials: array<f32>;
 
 // Constants
 const PI = 3.14159265359;
 const EPSILON = 0.0001;
 const MAX_BOUNCES = 3;
+const VERTICES_PER_TRIANGLE = 9; // 3 vertices × 3 coordinates
+const VALUES_PER_MATERIAL = 6;   // albedo (3), metalness, roughness, emissive
 
 // Ray structure
 struct Ray {
@@ -51,14 +54,14 @@ struct Material {
 };
 
 // Random number generation (PCG hash)
-fn pcg(inout state: u32) -> u32 {
-  state = state * 747796405u + 2891336453u;
-  var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+fn pcg(state_ptr: ptr<function, u32>) -> u32 {
+  *state_ptr = *state_ptr * 747796405u + 2891336453u;
+  var word = ((*state_ptr >> ((*state_ptr >> 28u) + 4u)) ^ *state_ptr) * 277803737u;
   return (word >> 22u) ^ word;
 }
 
 fn rand(seed: ptr<function, u32>) -> f32 {
-  *seed = pcg(*seed);
+  *seed = pcg(seed);
   return f32(*seed) / 4294967295.0;
 }
 
@@ -116,8 +119,19 @@ fn rayTriangleIntersect(ray: Ray, triangleIndex: u32) -> HitRecord {
   record.hit = false;
   record.t = 1e30;
   
+  // Calculate array bounds for safety checks
+  let vertexCount = arrayLength(&vertices);
+  let normalCount = arrayLength(&normals);
+  
+  // Each triangle uses 9 values (3 vertices × 3 coordinates)
+  let baseIdx = triangleIndex * VERTICES_PER_TRIANGLE;
+  
+  // Check if triangle data is within bounds
+  if (baseIdx + 8 >= vertexCount || baseIdx + 8 >= normalCount) {
+    return record; // Early return if out of bounds
+  }
+  
   // Get triangle vertices
-  let baseIdx = triangleIndex * 9;
   let v0 = vec3f(vertices[baseIdx],
                  vertices[baseIdx + 1],
                  vertices[baseIdx + 2]);
@@ -168,7 +182,7 @@ fn rayTriangleIntersect(ray: Ray, triangleIndex: u32) -> HitRecord {
     record.t = t;
     record.position = ray.origin + ray.direction * t;
     
-    // Get normals from buffer
+    // Get normals from buffer (with bounds already checked above)
     let n0 = vec3f(normals[baseIdx],
                    normals[baseIdx + 1],
                    normals[baseIdx + 2]);
@@ -196,8 +210,9 @@ fn intersectScene(ray: Ray) -> HitRecord {
   closest.hit = false;
   closest.t = 1e30;
   
-  // Get triangle count
-  let triangleCount = arrayLength(&vertices) / 9;
+  // Get triangle count safely (ensure it's a multiple of VERTICES_PER_TRIANGLE)
+  let vertexCount = arrayLength(&vertices);
+  let triangleCount = vertexCount / VERTICES_PER_TRIANGLE;
   
   // Test against all triangles
   for (var i = 0u; i < triangleCount; i++) {
@@ -210,9 +225,31 @@ fn intersectScene(ray: Ray) -> HitRecord {
   return closest;
 }
 
-// Get material for a triangle
+// Get material for a triangle with safety bounds checking
 fn getMaterial(materialIndex: u32) -> Material {
-  let baseIdx = materialIndex * 8;
+  // Calculate total materials count (each material has VALUES_PER_MATERIAL values)
+  let materialCount = arrayLength(&materials) / VALUES_PER_MATERIAL;
+  
+  // Default material in case of out-of-bounds access
+  var defaultMaterial = Material(
+    vec3f(1.0, 0.0, 1.0), // Magenta color to indicate error
+    0.0, 
+    1.0,
+    0.0 
+  );
+  
+  // Check if material index is out of bounds
+  if (materialIndex >= materialCount) {
+    return defaultMaterial;
+  }
+  
+  // Each material uses VALUES_PER_MATERIAL values
+  let baseIdx = materialIndex * VALUES_PER_MATERIAL;
+  
+  // Additional bounds check for the specific material data
+  if (baseIdx + (VALUES_PER_MATERIAL - 1) >= arrayLength(&materials)) {
+    return defaultMaterial;
+  }
   
   return Material(
     vec3f(materials[baseIdx],
@@ -304,49 +341,57 @@ fn pathTrace(ray: Ray, seed: ptr<function, u32>) -> vec3f {
   return result;
 }
 
+// ACES tone mapping implementation
+fn ACESFilm(x: vec3f) -> vec3f {
+  let a = 2.51;
+  let b = 0.03;
+  let c = 2.43;
+  let d = 0.59;
+  let e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3f(0.0), vec3f(1.0));
+}
+
+// Modify the part of your shader that reads from the accumulation texture
+// Instead of directly reading from the storage texture, use the sampler:
+fn getAccumulatedColor(pixel: vec2u) -> vec4f {
+  return textureLoad(prevAccumulationTexture, vec2<i32>(pixel), 0);
+}
+
 // Main compute shader
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3u) {
   let dimensions = textureDimensions(accumulationTexture);
+  let pixel = global_id.xy;
   
-  // Check if within bounds
-  if (global_id.x >= dimensions.x || global_id.y >= dimensions.y) {
+  // Skip if outside the texture dimensions
+  if (pixel.x >= dimensions.x || pixel.y >= dimensions.y) {
     return;
   }
   
-  // Initialize random seed
-  var seed = uniforms.seed + 
-            global_id.x * 1973u + 
-            global_id.y * 9277u + 
-            uniforms.sampleCount * 26699u;
+  // Generate random seed for this pixel
+  var seed = uniforms.seed + pixel.x * 1973 + pixel.y * 9277;
   
-  // Generate ray for this pixel
-  let ray = generateRay(global_id.xy, &seed);
+  // Generate camera ray for this pixel
+  let ray = generateRay(pixel, &seed);
   
-  // Trace path through scene
-  let radiance = pathTrace(ray, &seed);
+  // Trace the path and get the color for this pixel
+  let pixelColor = pathTrace(ray, &seed);
   
-  // Load previous accumulated color
-  let previousColor = textureLoad(accumulationTexture, vec2i(global_id.xy));
-  
-  // Progressive accumulation
-  var newColor: vec4f;
-  if (uniforms.sampleCount == 0u) {
-    newColor = vec4f(radiance, 1.0);
-  } else {
-    newColor = vec4f(
-      (previousColor.rgb * f32(uniforms.sampleCount) + radiance) / f32(uniforms.sampleCount + 1u),
-      1.0
-    );
+  // Blend with accumulated color
+  var prevColor = vec4f(0.0, 0.0, 0.0, 0.0);
+  if (uniforms.sampleCount > 0) {
+    prevColor = getAccumulatedColor(pixel);
   }
   
-  // Store accumulated result
-  textureStore(accumulationTexture, vec2i(global_id.xy), newColor);
+  // Accumulate
+  let newSampleWeight = 1.0 / f32(uniforms.sampleCount + 1);
+  let prevSampleWeight = 1.0 - newSampleWeight;
+  let accumulatedColor = prevColor * prevSampleWeight + vec4f(pixelColor, 1.0) * newSampleWeight;
   
-  // Apply tone mapping for display
-  let toneMapped = newColor.rgb / (newColor.rgb + vec3f(1.0));
-  let gammaCorrected = pow(toneMapped, vec3f(1.0/2.2));
+  // Write to accumulation texture
+  textureStore(accumulationTexture, pixel, accumulatedColor);
   
-  // Store result in output texture
-  textureStore(outputTexture, vec2i(global_id.xy), vec4f(gammaCorrected, 1.0));
+  // Tone map and write to output texture
+  let tonemapped = ACESFilm(accumulatedColor.rgb);
+  textureStore(outputTexture, pixel, vec4f(tonemapped, 1.0));
 }

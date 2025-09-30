@@ -6,13 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "maze_solver_app"
 version = "0.1.0"
 description = "Maze solver application"
-requires-python = "==3.12.10"
+requires-python = ">=3.12.10"
 dependencies = [
     "fastapi",
     "numpy",
+    "redis",
     "uvicorn[standard]",
     "websockets",
-    "pydantic",
     "networkx",
     "matplotlib",
     "rust_maze_solver",

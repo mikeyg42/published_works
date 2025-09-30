@@ -3,6 +3,10 @@
   <div class="loading-overlay" *ngIf="isLoading">
     <div class="spinner"></div>
   </div>
+  <button [disabled]="isAnimating || isGenerating || isLoading">
+    {{ isGenerating ? 'Generating…' : 'Regenerate Map' }}
+  </button>
+ 
   <div #mazeCanvas class="maze-canvas debug-border" [style.min-width.px]="canvasWidth"></div>
   
   <div class="controls" *ngIf="initialized">
@@ -12,4 +16,5 @@
   </div>
   
   <div class="status" *ngIf="statusMessage">{{ statusMessage }}</div>
+  
 </div>

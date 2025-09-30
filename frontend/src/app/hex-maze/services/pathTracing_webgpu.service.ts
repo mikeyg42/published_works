@@ -9,7 +9,9 @@
 
 import { Injectable } from '@angular/core';
 import * as THREE from 'three';
-import { loadShaderFile } from './shaders/shader-loader';
+import { loadShaderFile } from '../../../assets/shaders/shader-loader';
+import { ShaderBindings } from '../../../assets/shaders/shader-bindings';
+import { initializeWebGPU, assessDevicePerformance, defaultPathTracingRequirements } from '../../../assets/shaders/webgpu-utils';
 
 @Injectable({
   providedIn: 'root'
@@ -36,7 +38,8 @@ export class PathTracerService {
   private materialBuffer: GPUBuffer | null = null;
   
   // Textures
-  private accumulationTexture: GPUTexture | null = null;
+  private accumulationTexture1: GPUTexture | null = null;
+  private accumulationTexture2: GPUTexture | null = null;
   private outputTexture: GPUTexture | null = null;
   
   // Rendering state
@@ -53,58 +56,80 @@ export class PathTracerService {
   // Animation
   private animationFrameId: number | null = null;
   private isDisposed: boolean = false;
+  private camera: THREE.Camera | null = null;
 
+  public errorMessage: string | null = null;
+  public devicePerformance: { rating: 'low' | 'medium' | 'high'; recommendedSettings: { workgroupSize: [number, number]; maxBounces: number; useAO: boolean; }; } | null = null;
   
+  // New properties
+  private currentAccumulationTexture: number = 0; // 0 or 1 to track which texture is current
+  private computeBindGroups: GPUBindGroup[] = [];
+
+  private isInitialized: boolean = false;
+  private sceneReady: boolean = false;
+  private buildingScene: boolean = false;
+
+  // CRASH PREVENTION MEASURES
+  private renderErrorCount: number = 0;
+  private maxRenderErrors: number = 10;
+  private lastRenderTime: number = 0;
+  private minRenderInterval: number = 16; // Limit to ~60fps max
+  private maxTextureSize: number = 2048; // Prevent excessive memory usage
+  private isRenderLoopActive: boolean = false;
+
   /**
-   * Initializes the path tracer with a WebGPU device, context, and pipelines.
+   * Initialize with an existing WebGPU device (shared)
+   * This is the preferred initialization method to avoid multiple device conflicts
    */
-  async initialize(container: HTMLElement): Promise<void> {
-    console.log('Initializing WebGPU path tracer');
+  async initializeWithDevice(
+    container: HTMLElement, 
+    sharedDevice: GPUDevice
+  ): Promise<void> {
+    console.log('Initializing WebGPU path tracer with shared device');
+    this.errorMessage = null;
+    this.device = sharedDevice; // Use the shared device
     
     // Create canvas
     this.canvas = document.createElement('canvas');
     this.canvas.style.width = '100%';
     this.canvas.style.height = '100%';
+    this.canvas.style.position = 'absolute';
+    this.canvas.style.top = '0';
+    this.canvas.style.left = '0';
+    this.canvas.style.zIndex = '1000'; // Make sure it's on top
+    this.canvas.style.pointerEvents = 'none'; // Allow interactions to pass through
+    this.canvas.id = 'webgpu-path-tracer-canvas';
     container.appendChild(this.canvas);
+
+    console.log('WebGPU canvas created and added to container');
+    
+    // Force layout and wait for canvas dimensions
+    console.log('Waiting for canvas to be properly sized...');
+    await new Promise<void>(resolve => {
+      const checkSize = () => {
+        if (this.canvas!.clientWidth > 0 && this.canvas!.clientHeight > 0) {
+          console.log(`Canvas sized: ${this.canvas!.clientWidth}x${this.canvas!.clientHeight}`);
+          resolve();
+        } else {
+          requestAnimationFrame(checkSize);
+        }
+      };
+      checkSize();
+    });
     
     // Set initial size
     this.updateCanvasSize();
     
-    // Setup resize observer
+    // Setup resize observer - IMPORTANT: Keep this!
     const resizeObserver = new ResizeObserver(() => {
       this.updateCanvasSize();
       this.resetRendering();
     });
     resizeObserver.observe(container);
     
-    // Check WebGPU support
-    if (!navigator.gpu) {
-      throw new Error('WebGPU is not supported in this browser.');
-    }
-    
-    // Request adapter
-    const adapter = await navigator.gpu.requestAdapter({
-      powerPreference: 'high-performance'
-    });
-    
-    if (!adapter) {
-      throw new Error('Failed to get GPU adapter.');
-    }
-    
-    console.log('WebGPU adapter obtained:', adapter.limits);
-    
-    // Request device
-    this.device = await adapter.requestDevice({
-      requiredFeatures: [],
-      requiredLimits: {
-        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-        maxComputeWorkgroupStorageSize: adapter.limits.maxComputeWorkgroupStorageSize
-      }
-    });
-    
-    // Configure context
+    // Configure context with shared device
     this.context = this.canvas.getContext('webgpu');
-    if (!this.device || !this.context) {
+    if (!this.context) {
       throw new Error('Failed to create WebGPU context.');
     }
     
@@ -130,8 +155,8 @@ export class PathTracerService {
     // Load shader code
     try {
       // These paths should match your assets configuration in angular.json
-      this.pathTracingShaderText = await loadShaderFile('./src/app/hex-maze/services/shaders/pathTracing.wgsl');
-      this.displayShaderText = await loadShaderFile('./src/app/hex-maze/services/shaders/display.wgsl');
+      this.pathTracingShaderText = await loadShaderFile('/assets/shaders/pathTracing.wgsl');
+      this.displayShaderText = await loadShaderFile('/assets/shaders/display.wgsl');
       console.log('Shaders loaded successfully');
     } catch (error) {
       console.error('Failed to load shaders:', error);
@@ -175,15 +200,28 @@ export class PathTracerService {
     // Initialize default scene parameters
     this.initializeDefaultSceneParams();
     
-    // Create initial bind groups
-    this.createBindGroups();
+    // DEFERRED BIND GROUP CREATION - only create if all resources are available
+    this.tryCreateBindGroups();
     
     // Set quality
     this.setQuality(this.quality);
     
-    console.log('WebGPU Path Tracer initialized successfully.');
+    console.log('WebGPU Path Tracer initialized successfully with shared device.');
+
+    // Mark as initialized
+    this.isInitialized = true;
+    // Don't start render loop here - it will be started after scene is built
   }
 
+  /**
+   * Initializes the path tracer with a WebGPU device, context, and pipelines.
+   */
+  async initialize(container: HTMLElement): Promise<void> {
+    console.warn('PathTracer.initialize() deprecated - use initializeWithDevice()');
+    // Don't create a new device - wait for shared device
+    throw new Error('PathTracer requires shared WebGPU device');
+  }
+  
   private initializeDefaultSceneParams(): void {
     if (!this.device || !this.uniformBuffer) return;
     
@@ -228,16 +266,65 @@ export class PathTracerService {
   }
 
   /**
+   * Attempts to create bind groups only if all required resources are available.
+   * This is called from multiple places to handle deferred initialization.
+   */
+  private tryCreateBindGroups(): void {
+    if (!this.device || !this.uniformBuffer || !this.computePipeline || !this.renderPipeline ||
+        !this.accumulationTexture1 || !this.accumulationTexture2 || !this.outputTexture) {
+      console.log('Deferring bind group creation: required resources not yet initialized.');
+      return;
+    }
+
+    // Always create placeholder buffers if scene buffers don't exist yet
+    if (!this.vertexBuffer) {
+      console.log('Creating placeholder vertex buffer');
+      this.vertexBuffer = this.createBufferWithData(
+        new Float32Array([0, 0, 0]), // Single triangle placeholder
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      );
+    }
+    if (!this.normalBuffer) {
+      console.log('Creating placeholder normal buffer');
+      this.normalBuffer = this.createBufferWithData(
+        new Float32Array([0, 1, 0]), // Default up normal
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      );
+    }
+    if (!this.materialBuffer) {
+      console.log('Creating placeholder material buffer');
+      this.materialBuffer = this.createBufferWithData(
+        new Float32Array([0.5, 0.5, 0.5, 0.0, 0.5, 0.0]), // Default gray material
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      );
+    }
+
+    console.log('Creating bind groups - all resources available.');
+    this.createBindGroups();
+  }
+
+  /**
    * Updates the canvas dimensions to match the container.
+   * CRASH PREVENTION: Limits maximum texture size and prevents excessive reallocations
    */
   private updateCanvasSize(): void {
     if (!this.canvas) return;
     
-    const dpr = window.devicePixelRatio || 1;
-    const width = Math.floor(this.canvas.clientWidth * dpr);
-    const height = Math.floor(this.canvas.clientHeight * dpr);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2); // Limit device pixel ratio
+    const rawWidth = Math.floor(this.canvas.clientWidth * dpr);
+    const rawHeight = Math.floor(this.canvas.clientHeight * dpr);
+    
+    // CRASH PREVENTION: Limit maximum size to prevent GPU memory exhaustion
+    const width = Math.max(1, Math.min(this.maxTextureSize, rawWidth));
+    const height = Math.max(1, Math.min(this.maxTextureSize, rawHeight));
+    
+    // Skip if size hasn't changed significantly to prevent excessive recreation
+    if (Math.abs(width - this.width) < 2 && Math.abs(height - this.height) < 2) {
+      return;
+    }
     
     if (this.width !== width || this.height !== height) {
+      console.log(`Canvas size changed: ${this.width}x${this.height} → ${width}x${height} (limited from ${rawWidth}x${rawHeight})`);
       this.width = width;
       this.height = height;
       this.aspectRatio = width / height;
@@ -245,9 +332,14 @@ export class PathTracerService {
       this.canvas.width = width;
       this.canvas.height = height;
       
-      if (this.device) {
+      if (this.device && this.width > 0 && this.height > 0) {
+        // Create textures first
         this.createTextures();
-        this.createBindGroups();
+        
+        // Then try to create bind groups (will succeed if all resources are ready)
+        this.tryCreateBindGroups();
+        
+        // Reset rendering with new dimensions
         this.resetRendering();
       }
     }
@@ -260,14 +352,21 @@ export class PathTracerService {
     if (!this.device || this.width === 0 || this.height === 0) return;
     
     // Clean up existing textures
-    this.accumulationTexture?.destroy();
+    this.accumulationTexture1?.destroy();
+    this.accumulationTexture2?.destroy();
     this.outputTexture?.destroy();
     
-    // Create accumulation texture (32-bit float for HDR)
-    this.accumulationTexture = this.device.createTexture({
+    // Create two accumulation textures (32-bit float for HDR)
+    this.accumulationTexture1 = this.device.createTexture({
       size: [this.width, this.height],
       format: 'rgba32float',
-      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+    });
+    
+    this.accumulationTexture2 = this.device.createTexture({
+      size: [this.width, this.height],
+      format: 'rgba32float',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
     });
     
     // Create output texture (8-bit for display)
@@ -276,99 +375,100 @@ export class PathTracerService {
       format: 'rgba8unorm',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
     });
+    
+    // Reset the current texture index
+    this.currentAccumulationTexture = 0;
   }
 
   /**
    * Creates the bind groups for the compute and render pipelines.
+   * This method assumes all required resources are available.
    */
-  
-  // Replace the ng seGroups method with this fixed version
-private createBindGroups(): void {
-  if (!this.device || !this.uniformBuffer || !this.computePipeline || !this.renderPipeline ||
-      !this.accumulationTexture || !this.outputTexture) {
-    console.warn('Cannot create bind groups: required resources not initialized.');
-    return;
-  }
-  
-  // Create sampler for rendering
-  const sampler = this.device.createSampler({
-    magFilter: 'linear',
-    minFilter: 'linear'
-  });
-  
-  // Create entries for compute bind group
-  const computeEntries: GPUBindGroupEntry[] = [
-      {
-        binding: 0,
-        resource: { buffer: this.uniformBuffer }
-      },
-      {
-        binding: 1,
-        resource: this.accumulationTexture.createView()
-      },
-      {
-        binding: 2,
-        resource: this.outputTexture.createView()
-      }
-    ];
-    
-    // Add geometry buffers if they exist
-    if (this.vertexBuffer) {
-      computeEntries.push({
-        binding: 3,
-        resource: { buffer: this.vertexBuffer }
-      });
-    }
-    
-    if (this.normalBuffer) {
-      computeEntries.push({
-        binding: 4,
-        resource: { buffer: this.normalBuffer }
-      });
-    }
-    
-    if (this.materialBuffer) {
-      computeEntries.push({
-        binding: 5,
-        resource: { buffer: this.materialBuffer }
-      });
-    }
-    
-    // Create compute bind group - use entries, not bindings
-    try {
-      this.computeBindGroup = this.device.createBindGroup({
-        layout: this.computePipeline.getBindGroupLayout(0),
-        entries: computeEntries
-      });
-    } catch (error) {
-      console.error('Failed to create compute bind group:', error);
+  private createBindGroups(): void {
+    if (!this.device || !this.uniformBuffer || !this.computePipeline || !this.renderPipeline ||
+        !this.accumulationTexture1 || !this.accumulationTexture2 || !this.outputTexture) {
+      console.warn('Cannot create bind groups: required resources not initialized.');
       return;
     }
 
-    // Create render bind group - use entries, not bindings
-    try {
-      this.renderBindGroup = this.device.createBindGroup({
-        layout: this.renderPipeline.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: this.outputTexture.createView()
-          },
-          {
-            binding: 1,
-            resource: sampler
-          }
-        ]
-      });
-    } catch (error) {
-      console.error('Failed to create render bind group:', error);
+    // Create sampler for rendering and reading textures
+    const sampler = this.device.createSampler({
+      magFilter: 'linear',
+      minFilter: 'linear'
+    });
+
+    // Get the bind group layout from the compute pipeline (created with 'auto' layout)
+    const computeBindGroupLayout = this.computePipeline.getBindGroupLayout(0);
+
+    // Create compute bind group entries for ping-pong textures
+    const computeEntries1: GPUBindGroupEntry[] = [
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, // uniforms
+      { binding: 1, resource: this.accumulationTexture2.createView() }, // prevAccumulationTexture
+      { binding: 2, resource: this.accumulationTexture1.createView() }, // accumulationTexture (write)
+      { binding: 3, resource: this.outputTexture.createView() }, // outputTexture
+    ];
+
+    const computeEntries2: GPUBindGroupEntry[] = [
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, // uniforms
+      { binding: 1, resource: this.accumulationTexture1.createView() }, // prevAccumulationTexture
+      { binding: 2, resource: this.accumulationTexture2.createView() }, // accumulationTexture (write)
+      { binding: 3, resource: this.outputTexture.createView() }, // outputTexture
+    ];
+
+    // Add vertex/normal/material buffers if they exist
+    if (this.vertexBuffer) {
+      computeEntries1.push({ binding: 4, resource: { buffer: this.vertexBuffer } });
+      computeEntries2.push({ binding: 4, resource: { buffer: this.vertexBuffer } });
+      console.log('Added vertex buffer to bind group');
     }
+    if (this.normalBuffer) {
+      computeEntries1.push({ binding: 5, resource: { buffer: this.normalBuffer } });
+      computeEntries2.push({ binding: 5, resource: { buffer: this.normalBuffer } });
+      console.log('Added normal buffer to bind group');
+    }
+    if (this.materialBuffer) {
+      computeEntries1.push({ binding: 6, resource: { buffer: this.materialBuffer } });
+      computeEntries2.push({ binding: 6, resource: { buffer: this.materialBuffer } });
+      console.log('Added material buffer to bind group');
+    }
+    
+    // Create compute bind groups using the pipeline's layout
+    const computeBindGroup1 = this.device.createBindGroup({
+      layout: computeBindGroupLayout,
+      entries: computeEntries1
+    });
+    
+    const computeBindGroup2 = this.device.createBindGroup({
+      layout: computeBindGroupLayout,
+      entries: computeEntries2
+    });
+    
+    // Store both bind groups and initialize with the first one
+    this.computeBindGroups = [computeBindGroup1, computeBindGroup2];
+    this.computeBindGroup = this.computeBindGroups[this.currentAccumulationTexture];
+
+    // --- Render Bind Group (Display) ---
+    // Get the bind group layout from the render pipeline
+    const renderBindGroupLayout = this.renderPipeline.getBindGroupLayout(0);
+    
+    const renderEntries: GPUBindGroupEntry[] = [
+      { binding: 0, resource: this.outputTexture.createView() }, // outputTexture
+      { binding: 1, resource: sampler }, // textureSampler
+    ];
+    
+    this.renderBindGroup = this.device.createBindGroup({
+      layout: renderBindGroupLayout,
+      entries: renderEntries
+    });
+    
+    console.log('Bind groups created successfully.');
   }
 
   /**
    * Updates the camera parameters for the path tracer.
    */
   updateCamera(camera: THREE.Camera): void {
+    this.camera = camera;
     if (!this.device || !this.uniformBuffer) return;
     
     // Extract camera parameters
@@ -419,6 +519,12 @@ private createBindGroups(): void {
       this.device.queue.writeBuffer(this.uniformBuffer, 60, seedData); // seed at offset 60
     }
     
+    // Reset to using the first accumulation texture
+    this.currentAccumulationTexture = 0;
+    if (this.computeBindGroups.length > 0) {
+      this.computeBindGroup = this.computeBindGroups[this.currentAccumulationTexture];
+    }
+    
     console.log('Path tracer accumulation reset.');
   }
 
@@ -437,215 +543,242 @@ private createBindGroups(): void {
       return;
     }
     
-    console.log('Building path traced scene from maze geometry...');
-    console.log(`Tiles: ${params.tiles.length}, Walls: ${params.walls.length}`);
-    
-    // Collect all meshes
-    const allMeshes = [...params.tiles, ...params.walls];
-    
-    // Skip if no meshes
-    if (allMeshes.length === 0) {
-      console.warn('No meshes provided to buildSceneFromMaze');
+    // Prevent concurrent scene building
+    if (this.buildingScene) {
+      console.log('Scene building already in progress, skipping...');
       return;
     }
     
-    // Count total triangles
-    let totalTriangleCount = 0;
-    allMeshes.forEach(mesh => {
-      if (!mesh || !mesh.geometry) return;
+    this.buildingScene = true;
+    
+    try {
+      console.log('Building path traced scene from maze geometry...');
+      console.log(`Tiles: ${params.tiles.length}, Walls: ${params.walls.length}`);
       
-      const geometry = mesh.geometry;
-      if (geometry instanceof THREE.BufferGeometry) {
-        const index = geometry.index;
-        const position = geometry.attributes['position'];
+      // Collect all meshes
+      const allMeshes = [...params.tiles, ...params.walls];
+      
+      // Skip if no meshes
+      if (allMeshes.length === 0) {
+        console.warn('No meshes provided to buildSceneFromMaze');
+        return;
+            }
+      
+      // Count total triangles
+      let totalTriangleCount = 0;
+      allMeshes.forEach(mesh => {
+        if (!mesh || !mesh.geometry) return;
         
-        if (position && position.count > 0) {
+        const geometry = mesh.geometry;
+        if (geometry instanceof THREE.BufferGeometry) {
+          const index = geometry.index;
+          const position = geometry.attributes['position'];
+          
+          if (position && position.count > 0) {
+            if (index) {
+              totalTriangleCount += index.count / 3;
+            } else {
+              totalTriangleCount += position.count / 3;
+            }
+          }
+        }
+      });
+      
+      console.log(`Total triangles: ${totalTriangleCount}`);
+      
+      if (totalTriangleCount === 0) {
+        console.warn('No triangles found in provided meshes');
+        return;
+      }
+      
+      // Create arrays for geometry data
+      const vertices = new Float32Array(totalTriangleCount * 9);
+      const normals = new Float32Array(totalTriangleCount * 9);
+      const materials = new Float32Array(totalTriangleCount * 6); // Match shader VALUES_PER_MATERIAL = 6
+      
+      // Process all meshes
+      let triangleOffset = 0;
+      let materialOffset = 0;
+      
+      const tempMatrix = new THREE.Matrix4();
+      const tempVec3 = new THREE.Vector3();
+      const tempNormal = new THREE.Vector3();
+      
+      allMeshes.forEach((mesh, meshIndex) => {
+        if (!mesh || !mesh.geometry) return;
+        
+        const geometry = mesh.geometry;
+        if (!(geometry instanceof THREE.BufferGeometry)) return;
+        
+        const position = geometry.attributes['position'];
+        const normal = geometry.attributes['normal'];
+        const index = geometry.index;
+        
+        if (!position) return;
+        
+        // Get mesh transform
+        tempMatrix.copy(mesh.matrixWorld);
+        
+        // Get material properties
+        let materialColor = new THREE.Color(0.8, 0.8, 0.8);
+        let metalness = 0.0;
+        let roughness = 0.5;
+        let emissive = 0.0;
+        
+        if (mesh.material) {
+          const material = mesh.material as THREE.MeshStandardMaterial;
+          if (material.color) materialColor.copy(material.color);
+          if (material.metalness !== undefined) metalness = material.metalness;
+          if (material.roughness !== undefined) roughness = material.roughness;
+          if (material.emissive) {
+            const em = material.emissive;
+            emissive = (em.r * 0.2126 + em.g * 0.7152 + em.b * 0.0722) * 
+                      (material.emissiveIntensity !== undefined ? material.emissiveIntensity : 1.0);
+          }
+        }
+        
+        try {
+          // Process geometry
           if (index) {
-            totalTriangleCount += index.count / 3;
+            // Indexed geometry
+            for (let i = 0; i < index.count; i += 3) {
+              for (let j = 0; j < 3; j++) {
+                const idx = index.getX(i + j);
+                
+                // Get vertex and transform to world space
+                tempVec3.fromBufferAttribute(position, idx);
+                tempVec3.applyMatrix4(tempMatrix);
+                
+                vertices[triangleOffset + j * 3] = tempVec3.x;
+                vertices[triangleOffset + j * 3 + 1] = tempVec3.y;
+                vertices[triangleOffset + j * 3 + 2] = tempVec3.z;
+                
+                // Get normal and transform to world space
+                if (normal) {
+                  tempNormal.fromBufferAttribute(normal, idx);
+                  tempNormal.transformDirection(tempMatrix);
+                  tempNormal.normalize();
+                  
+                  normals[triangleOffset + j * 3] = tempNormal.x;
+                  normals[triangleOffset + j * 3 + 1] = tempNormal.y;
+                  normals[triangleOffset + j * 3 + 2] = tempNormal.z;
+                } else {
+                  // Default normal if none provided
+                  normals[triangleOffset + j * 3] = 0;
+                  normals[triangleOffset + j * 3 + 1] = 1;
+                  normals[triangleOffset + j * 3 + 2] = 0;
+                }
+              }
+              
+              // Store material properties (6 values per material to match shader)
+              materials[materialOffset] = materialColor.r;
+              materials[materialOffset + 1] = materialColor.g;
+              materials[materialOffset + 2] = materialColor.b;
+              materials[materialOffset + 3] = metalness;
+              materials[materialOffset + 4] = roughness;
+              materials[materialOffset + 5] = emissive;
+
+              triangleOffset += 9;
+              materialOffset += 6; // Match shader VALUES_PER_MATERIAL = 6
+            }
           } else {
-            totalTriangleCount += position.count / 3;
+            // Non-indexed geometry
+            for (let i = 0; i < position.count; i += 3) {
+              for (let j = 0; j < 3; j++) {
+                // Get vertex and transform to world space
+                tempVec3.fromBufferAttribute(position, i + j);
+                tempVec3.applyMatrix4(tempMatrix);
+                
+                vertices[triangleOffset + j * 3] = tempVec3.x;
+                vertices[triangleOffset + j * 3 + 1] = tempVec3.y;
+                vertices[triangleOffset + j * 3 + 2] = tempVec3.z;
+                
+                // Get normal and transform to world space
+                if (normal) {
+                  tempNormal.fromBufferAttribute(normal, i + j);
+                  tempNormal.transformDirection(tempMatrix);
+                  tempNormal.normalize();
+                  
+                  normals[triangleOffset + j * 3] = tempNormal.x;
+                  normals[triangleOffset + j * 3 + 1] = tempNormal.y;
+                  normals[triangleOffset + j * 3 + 2] = tempNormal.z;
+                } else {
+                  // Default normal if none provided
+                  normals[triangleOffset + j * 3] = 0;
+                  normals[triangleOffset + j * 3 + 1] = 1;
+                  normals[triangleOffset + j * 3 + 2] = 0;
+                }
+              }
+              
+              // Store material properties (6 values per material to match shader)
+              materials[materialOffset] = materialColor.r;
+              materials[materialOffset + 1] = materialColor.g;
+              materials[materialOffset + 2] = materialColor.b;
+              materials[materialOffset + 3] = metalness;
+              materials[materialOffset + 4] = roughness;
+              materials[materialOffset + 5] = emissive;
+
+              triangleOffset += 9;
+              materialOffset += 6; // Match shader VALUES_PER_MATERIAL = 6
+            }
           }
+        } catch (error) {
+          console.error(`Error processing mesh ${meshIndex}:`, error);
         }
-      }
-    });
-    
-    console.log(`Total triangles: ${totalTriangleCount}`);
-    
-    if (totalTriangleCount === 0) {
-      console.warn('No triangles found in provided meshes');
-      return;
+      });
+      
+      console.log(`Processed ${triangleOffset / 9} triangles`);
+      
+      // Mark scene as not ready while we rebuild
+      this.sceneReady = false;
+      
+      // Clean up old buffers
+      if (this.vertexBuffer) this.vertexBuffer.destroy();
+      if (this.normalBuffer) this.normalBuffer.destroy();
+      if (this.materialBuffer) this.materialBuffer.destroy();
+      
+      // Create new buffers with the processed data
+      this.vertexBuffer = this.createBufferWithData(
+        vertices.slice(0, triangleOffset), 
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      );
+      
+      this.normalBuffer = this.createBufferWithData(
+        normals.slice(0, triangleOffset), 
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      );
+      
+      this.materialBuffer = this.createBufferWithData(
+        materials.slice(0, materialOffset), 
+        GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      );
+      
+      // Update bind groups with new buffers
+      // Clear old bind groups to force recreation
+      this.computeBindGroups = [];
+      this.computeBindGroup = null;
+      this.renderBindGroup = null;
+      
+      // Now recreate bind groups with the new buffers
+      this.tryCreateBindGroups();
+      
+      // Reset rendering since scene changed
+      this.resetRendering();
+      
+      // Mark scene as ready for rendering
+      this.sceneReady = true;
+      
+      console.log('Path traced scene built successfully with', triangleOffset / 9, 'triangles.');
+
+      // Now start the render loop
+      this.startRenderLoop();
+      
+    } catch (error) {
+      console.error('Error building path traced scene:', error);
+    } finally {
+      // Reset the building flag
+      this.buildingScene = false;
     }
-    
-    // Create arrays for geometry data
-    const vertices = new Float32Array(totalTriangleCount * 9);
-    const normals = new Float32Array(totalTriangleCount * 9);
-    const materials = new Float32Array(totalTriangleCount * 8);
-    
-    // Process all meshes
-    let triangleOffset = 0;
-    let materialOffset = 0;
-    
-    const tempMatrix = new THREE.Matrix4();
-    const tempVec3 = new THREE.Vector3();
-    const tempNormal = new THREE.Vector3();
-    
-    allMeshes.forEach((mesh, meshIndex) => {
-      if (!mesh || !mesh.geometry) return;
-      
-      const geometry = mesh.geometry;
-      if (!(geometry instanceof THREE.BufferGeometry)) return;
-      
-      const position = geometry.attributes['position'];
-      const normal = geometry.attributes['normal'];
-      const index = geometry.index;
-      
-      if (!position) return;
-      
-      // Get mesh transform
-      tempMatrix.copy(mesh.matrixWorld);
-      
-      // Get material properties
-      let materialColor = new THREE.Color(0.8, 0.8, 0.8);
-      let metalness = 0.0;
-      let roughness = 0.5;
-      let emissive = 0.0;
-      
-      if (mesh.material) {
-        const material = mesh.material as THREE.MeshStandardMaterial;
-        if (material.color) materialColor.copy(material.color);
-        if (material.metalness !== undefined) metalness = material.metalness;
-        if (material.roughness !== undefined) roughness = material.roughness;
-        if (material.emissive) {
-          const em = material.emissive;
-          emissive = (em.r * 0.2126 + em.g * 0.7152 + em.b * 0.0722) * 
-                    (material.emissiveIntensity !== undefined ? material.emissiveIntensity : 1.0);
-        }
-      }
-      
-      try {
-        // Process geometry
-        if (index) {
-          // Indexed geometry
-          for (let i = 0; i < index.count; i += 3) {
-            for (let j = 0; j < 3; j++) {
-              const idx = index.getX(i + j);
-              
-              // Get vertex and transform to world space
-              tempVec3.fromBufferAttribute(position, idx);
-              tempVec3.applyMatrix4(tempMatrix);
-              
-              vertices[triangleOffset + j * 3] = tempVec3.x;
-              vertices[triangleOffset + j * 3 + 1] = tempVec3.y;
-              vertices[triangleOffset + j * 3 + 2] = tempVec3.z;
-              
-              // Get normal and transform to world space
-              if (normal) {
-                tempNormal.fromBufferAttribute(normal, idx);
-                tempNormal.transformDirection(tempMatrix);
-                tempNormal.normalize();
-                
-                normals[triangleOffset + j * 3] = tempNormal.x;
-                normals[triangleOffset + j * 3 + 1] = tempNormal.y;
-                normals[triangleOffset + j * 3 + 2] = tempNormal.z;
-              } else {
-                // Default normal if none provided
-                normals[triangleOffset + j * 3] = 0;
-                normals[triangleOffset + j * 3 + 1] = 1;
-                normals[triangleOffset + j * 3 + 2] = 0;
-              }
-            }
-            
-            // Store material properties
-            materials[materialOffset] = materialColor.r;
-            materials[materialOffset + 1] = materialColor.g;
-            materials[materialOffset + 2] = materialColor.b;
-            materials[materialOffset + 3] = metalness;
-            materials[materialOffset + 4] = roughness;
-            materials[materialOffset + 5] = emissive;
-            materials[materialOffset + 6] = 0; // reserved
-            materials[materialOffset + 7] = 0; // reserved
-            
-            triangleOffset += 9;
-            materialOffset += 8;
-          }
-        } else {
-          // Non-indexed geometry
-          for (let i = 0; i < position.count; i += 3) {
-            for (let j = 0; j < 3; j++) {
-              // Get vertex and transform to world space
-              tempVec3.fromBufferAttribute(position, i + j);
-              tempVec3.applyMatrix4(tempMatrix);
-              
-              vertices[triangleOffset + j * 3] = tempVec3.x;
-              vertices[triangleOffset + j * 3 + 1] = tempVec3.y;
-              vertices[triangleOffset + j * 3 + 2] = tempVec3.z;
-              
-              // Get normal and transform to world space
-              if (normal) {
-                tempNormal.fromBufferAttribute(normal, i + j);
-                tempNormal.transformDirection(tempMatrix);
-                tempNormal.normalize();
-                
-                normals[triangleOffset + j * 3] = tempNormal.x;
-                normals[triangleOffset + j * 3 + 1] = tempNormal.y;
-                normals[triangleOffset + j * 3 + 2] = tempNormal.z;
-              } else {
-                // Default normal if none provided
-                normals[triangleOffset + j * 3] = 0;
-                normals[triangleOffset + j * 3 + 1] = 1;
-                normals[triangleOffset + j * 3 + 2] = 0;
-              }
-            }
-            
-            // Store material properties
-            materials[materialOffset] = materialColor.r;
-            materials[materialOffset + 1] = materialColor.g;
-            materials[materialOffset + 2] = materialColor.b;
-            materials[materialOffset + 3] = metalness;
-            materials[materialOffset + 4] = roughness;
-            materials[materialOffset + 5] = emissive;
-            materials[materialOffset + 6] = 0; // reserved
-            materials[materialOffset + 7] = 0; // reserved
-            
-            triangleOffset += 9;
-            materialOffset += 8;
-          }
-        }
-      } catch (error) {
-        console.error(`Error processing mesh ${meshIndex}:`, error);
-      }
-    });
-    
-    console.log(`Processed ${triangleOffset / 9} triangles`);
-    
-    // Clean up old buffers
-    if (this.vertexBuffer) this.vertexBuffer.destroy();
-    if (this.normalBuffer) this.normalBuffer.destroy();
-    if (this.materialBuffer) this.materialBuffer.destroy();
-    
-    // Create new buffers with the processed data
-    this.vertexBuffer = this.createBufferWithData(
-      vertices.slice(0, triangleOffset), 
-      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    );
-    
-    this.normalBuffer = this.createBufferWithData(
-      normals.slice(0, triangleOffset), 
-      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    );
-    
-    this.materialBuffer = this.createBufferWithData(
-      materials.slice(0, materialOffset), 
-      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    );
-    
-    // Update bind groups with new buffers
-    this.createBindGroups();
-    
-    // Reset rendering since scene changed
-    this.resetRendering();
-    
-    console.log('Path traced scene built successfully with', triangleOffset / 9, 'triangles.');
   }
 
   /**
@@ -738,148 +871,272 @@ private createBindGroups(): void {
     this.resetRendering();
   }
 
-  /**
-   * Starts the rendering loop.
-   */
-  startRendering(): void {
-  // Cancel any existing rendering loop
-    if (this.animationFrameId !== null) {
-      cancelAnimationFrame(this.animationFrameId);
-      this.animationFrameId = null;
+  // Add a new method to start the render loop
+  public startRenderLoop() {
+    if (!this.isInitialized) {
+      console.warn('Path tracing not initialized yet');
+      return;
     }
     
-    // Reset if we've reached max samples
-    if (this.sampleCount >= this.maxSamples) {
-      this.resetRendering();
+    if (this.animationFrameId) {
+      console.warn('Render loop already running');
+      return;
     }
+
+    this.renderLoop();
+  }
+
+  private renderLoop() {
+    if (!this.isInitialized || this.isDisposed) return;
+
+    // CRASH PREVENTION: Limit render frequency to prevent excessive resource usage
+    const now = performance.now();
+    if (now - this.lastRenderTime < this.minRenderInterval) {
+      this.animationFrameId = requestAnimationFrame(() => this.renderLoop());
+      return;
+    }
+    this.lastRenderTime = now;
+
+    // CRASH PREVENTION: Check if we're already in a render loop to prevent recursion
+    if (this.isRenderLoopActive) {
+      console.warn('Render loop already active, skipping frame');
+      this.animationFrameId = requestAnimationFrame(() => this.renderLoop());
+      return;
+    }
+
+    this.isRenderLoopActive = true;
     
-    console.log('Starting path tracer rendering loop');
-    
-    // Define the render loop
-    const renderLoop = () => {
-      if (this.isDisposed) {
-        this.animationFrameId = null;
-        return;
+    try {
+      // Update camera if needed
+      if (this.camera) {
+        this.updateCamera(this.camera);
       }
-      
+
+      // Render the scene
       this.render();
       
-      // Continue rendering if we haven't reached max samples
-      if (this.sampleCount < this.maxSamples) {
-        this.animationFrameId = requestAnimationFrame(renderLoop);
-      } else {
-        // Animation stops when max samples reached
-        this.animationFrameId = null;
-        console.log(`Path tracing completed with ${this.sampleCount} samples`);
+      // Reset error count on successful render
+      this.renderErrorCount = 0;
+      
+    } catch (error) {
+      console.error('Error in render loop:', error);
+      this.renderErrorCount++;
+      
+      // CRASH PREVENTION: Stop render loop if too many errors occur
+      if (this.renderErrorCount >= this.maxRenderErrors) {
+        console.error(`Too many render errors (${this.renderErrorCount}), stopping render loop to prevent crash`);
+        this.stopRenderLoop();
+        return;
       }
-    };
+    } finally {
+      this.isRenderLoopActive = false;
+    }
     
-    // Start the loop
-    this.animationFrameId = requestAnimationFrame(renderLoop);
+    // Schedule next frame only if not disposed and not stopped
+    if (!this.isDisposed && this.animationFrameId !== null) {
+      this.animationFrameId = requestAnimationFrame(() => this.renderLoop());
+    }
+  }
+
+  /**
+   * Stop the render loop
+   * CRASH PREVENTION: Ensures render loop is properly stopped
+   */
+  public stopRenderLoop() {
+    if (this.animationFrameId) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+      console.log('Path tracer render loop stopped.');
+    }
+    
+    // Reset render loop flags
+    this.isRenderLoopActive = false;
+    this.renderErrorCount = 0;
   }
 
   /**
    * Performs a single render pass.
    */
   render(): void {
-    if (!this.device || !this.context || !this.computePipeline || !this.renderPipeline ||
-        !this.computeBindGroup || !this.renderBindGroup || !this.uniformBuffer) {
-      console.warn('Cannot render: some WebGPU resources are not initialized');
+    // CRASH PREVENTION: Early exit conditions
+    if (!this.sceneReady || this.isDisposed) {
       return;
     }
     
+    // CRASH PREVENTION: Limit total samples to prevent infinite rendering
+    if (this.sampleCount >= this.maxSamples) {
+      return;
+    }
+    
+    // Debug: log that we're attempting to render
+    if (this.sampleCount === 0 || this.sampleCount % 100 === 0) {
+      console.log(`Path tracer render: sceneReady=${this.sceneReady}, sampleCount=${this.sampleCount}, hasBindGroups=${!!this.computeBindGroup && !!this.renderBindGroup}`);
+    }
+    
+    if (!this.device || !this.context || !this.computePipeline || !this.renderPipeline ||
+        !this.computeBindGroup || !this.renderBindGroup || !this.uniformBuffer) {
+      // Add debugging to see what's missing
+      if (!this.device) console.warn('Path tracer render: device is null');
+      if (!this.context) console.warn('Path tracer render: context is null');
+      if (!this.computePipeline) console.warn('Path tracer render: computePipeline is null');
+      if (!this.renderPipeline) console.warn('Path tracer render: renderPipeline is null');
+      if (!this.computeBindGroup) console.warn('Path tracer render: computeBindGroup is null');
+      if (!this.renderBindGroup) console.warn('Path tracer render: renderBindGroup is null');
+      if (!this.uniformBuffer) console.warn('Path tracer render: uniformBuffer is null');
+
+      // Try to recreate bind groups if they're missing
+      if (!this.computeBindGroup || !this.renderBindGroup) {
+        console.log('Attempting to recreate missing bind groups...');
+        this.tryCreateBindGroups();
+      }
+
+      return;
+    }
+    
+    // Update time in uniform buffer
+    const timeData = new Float32Array([performance.now() / 1000.0]);
+    this.device.queue.writeBuffer(this.uniformBuffer, 64, timeData);
+    
+    // Increment sample count
+    this.sampleCount++;
+    
+    // Update sample count in uniform buffer
+    const sampleData = new Uint32Array([this.sampleCount]);
+    this.device.queue.writeBuffer(this.uniformBuffer, 56, sampleData);
+    
     try {
-      // Update sample count in uniform buffer
-      const sampleCountData = new Uint32Array([this.sampleCount]);
-      this.device.queue.writeBuffer(this.uniformBuffer, 56, sampleCountData);
+      // Debug: confirm we're actually executing render commands
+      if (this.sampleCount === 0) {
+        console.log('🎯 EXECUTING WebGPU render commands - first sample!');
+      }
+
+      // Create command encoder
+      const commandEncoder = this.device.createCommandEncoder();
       
-      // Update time value if needed
-      const timeData = new Float32Array([performance.now() / 1000.0]);
-      this.device.queue.writeBuffer(this.uniformBuffer, 64, timeData);
-      
-      // Create encoder
-      const encoder = this.device.createCommandEncoder();
-      
-      // Compute pass for path tracing
-      const computePass = encoder.beginComputePass();
+      // Dispatch compute shader
+      const computePass = commandEncoder.beginComputePass();
       computePass.setPipeline(this.computePipeline);
+      
+      // Use the current bind group (will be swapped after rendering)
       computePass.setBindGroup(0, this.computeBindGroup);
       
-      // Dispatch workgroups with ceiling division to cover all pixels
-      const workgroupsX = Math.ceil(this.width / 8);
-      const workgroupsY = Math.ceil(this.height / 8);
-      computePass.dispatchWorkgroups(workgroupsX, workgroupsY);
+      // Calculate dispatch size based on canvas dimensions
+      const workgroupSize = this.devicePerformance?.recommendedSettings?.workgroupSize || [8, 8];
+      const dispatchWidth = Math.ceil(this.width / workgroupSize[0]);
+      const dispatchHeight = Math.ceil(this.height / workgroupSize[1]);
+      
+      // CRASH PREVENTION: Limit dispatch size to prevent GPU overload
+      const maxDispatchSize = 1024;
+      if (dispatchWidth > maxDispatchSize || dispatchHeight > maxDispatchSize) {
+        console.warn(`Dispatch size too large: ${dispatchWidth}x${dispatchHeight}, limiting to ${maxDispatchSize}`);
+        throw new Error('Dispatch size exceeds safe limits');
+      }
+      
+      computePass.dispatchWorkgroups(dispatchWidth, dispatchHeight, 1);
       computePass.end();
       
-      // Render pass to display result
-      const renderPass = encoder.beginRenderPass({
+      // CRASH PREVENTION: Check context before getting current texture
+      if (!this.context) {
+        throw new Error('WebGPU context lost during render');
+      }
+      
+      // Render output texture to canvas
+      const currentTexture = this.context.getCurrentTexture();
+      const renderPass = commandEncoder.beginRenderPass({
         colorAttachments: [{
-          view: this.context.getCurrentTexture().createView(),
+          view: currentTexture.createView(),
           loadOp: 'clear',
           storeOp: 'store',
-          clearValue: { r: 0, g: 0, b: 0, a: 1 }
+          clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }
         }]
       });
-      
       renderPass.setPipeline(this.renderPipeline);
       renderPass.setBindGroup(0, this.renderBindGroup);
-      renderPass.draw(3);  // Full-screen triangle
+      renderPass.draw(3, 1, 0, 0); // Render full-screen triangles with 3 vertices, matches vertexMain
       renderPass.end();
       
-      // Submit commands
-      this.device.queue.submit([encoder.finish()]);
+      // Submit command buffer
+      this.device.queue.submit([commandEncoder.finish()]);
       
-      // Increment sample count
-      this.sampleCount++;
-      
-      if (this.sampleCount % 20 === 0) {
-        console.log(`Path tracing: ${this.sampleCount}/${this.maxSamples} samples`);
+      // Swap accumulation textures for next frame
+      this.currentAccumulationTexture = 1 - this.currentAccumulationTexture; // Toggle between 0 and 1
+      if (this.computeBindGroups.length > this.currentAccumulationTexture) {
+        this.computeBindGroup = this.computeBindGroups[this.currentAccumulationTexture];
       }
+      
     } catch (error) {
-      console.error('Error during WebGPU rendering:', error);
-      
-      // Cancel animation on error
-      if (this.animationFrameId !== null) {
-        cancelAnimationFrame(this.animationFrameId);
-        this.animationFrameId = null;
-      }
+      console.error('Error during WebGPU render:', error);
+      throw error; // Re-throw to be handled by render loop
     }
   }
 
   /**
    * Cleans up all WebGPU resources.
+   * CRASH PREVENTION: Ensures proper cleanup to prevent memory leaks
    */
   dispose(): void {
+    if (this.isDisposed) {
+      return; // Already disposed
+    }
+    
+    console.log('Disposing path tracer resources...');
     this.isDisposed = true;
     
-    // Cancel rendering loop
-    if (this.animationFrameId !== null) {
-      cancelAnimationFrame(this.animationFrameId);
-      this.animationFrameId = null;
+    // Stop render loop first
+    this.stopRenderLoop();
+    
+    // Wait for any active render loop to finish
+    if (this.isRenderLoopActive) {
+      console.log('Waiting for render loop to finish...');
+      // Give it a moment to finish
+      setTimeout(() => this.finalizeDispose(), 100);
+      return;
     }
     
-    // Destroy textures
-    this.accumulationTexture?.destroy();
-    this.outputTexture?.destroy();
-    
-    // Destroy buffers
-    this.vertexBuffer?.destroy();
-    this.normalBuffer?.destroy();
-    this.materialBuffer?.destroy();
-    this.uniformBuffer?.destroy();
-    
-    // Remove canvas
-    if (this.canvas && this.canvas.parentNode) {
-      this.canvas.parentNode.removeChild(this.canvas);
+    this.finalizeDispose();
+  }
+  
+  private finalizeDispose(): void {
+    try {
+      // Destroy textures
+      this.accumulationTexture1?.destroy();
+      this.accumulationTexture2?.destroy();
+      this.outputTexture?.destroy();
+      
+      // Destroy buffers
+      this.vertexBuffer?.destroy();
+      this.normalBuffer?.destroy();
+      this.materialBuffer?.destroy();
+      this.uniformBuffer?.destroy();
+      
+      // Remove canvas
+      if (this.canvas && this.canvas.parentNode) {
+        this.canvas.parentNode.removeChild(this.canvas);
+      }
+      
+      // Clear references
+      this.canvas = null;
+      this.device = null;
+      this.context = null;
+      this.format = null;
+      this.renderPipeline = null;
+      this.computePipeline = null;
+      this.renderBindGroup = null;
+      this.computeBindGroup = null;
+      this.computeBindGroups = [];
+      this.camera = null;
+      
+      // Reset state
+      this.isInitialized = false;
+      this.sceneReady = false;
+      this.buildingScene = false;
+      this.isRenderLoopActive = false;
+      this.sampleCount = 0;
+      this.renderErrorCount = 0;
+      
+      console.log('Path tracer resources disposed successfully.');
+    } catch (error) {
+      console.error('Error during path tracer disposal:', error);
     }
-    
-    // Clear references
-    this.canvas = null;
-    this.device = null;
-    this.context = null;
-    this.renderPipeline = null;
-    this.computePipeline = null;
-    
-    console.log('Path tracer resources disposed.');
   }
 }

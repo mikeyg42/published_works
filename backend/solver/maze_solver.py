@@ -18,8 +18,8 @@ from datetime import datetime
 from typing import Union
 import numpy as np
 import importlib.util
+from backend.redis_cache.cache import save as redis_save 
 
-# Removed commented-out static import of rust_maze_solver
 
 GraphLike = Union[nx.Graph, nx.DiGraph, nx.MultiGraph, dict[str, list[str]]]
 
@@ -29,10 +29,9 @@ class MazeSolver:
         self._output_dir = output_dir
         
         # Only create the directory if not running in Cloud Run (or similar env)
-        is_cloud_run = os.environ.get("CLOUD_RUN", "false").lower() == "true"
-        # Only attempt to create the directory if NOT in Cloud Run
+        is_cloud_run = os.environ.get("K_SERVICE", None) is not None  # Check if running in Cloud Run
         if not is_cloud_run:
-            # Check if the specific output_dir exists and create if needed
+            # Check if the specifivc output_dir exists and create if needed
             if not os.path.exists(self._output_dir):
                 try:
                     os.makedirs(self._output_dir, exist_ok=True)
@@ -57,6 +56,10 @@ class MazeSolver:
         self._cancel_locks = {}
         self._thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=int(os.environ.get("CPU_LIMIT", 4)))
         self._thread_pool_lock = threading.Lock()
+        
+        # Map of session_id ➜ (original_data, all_solutions) for on-demand visualization
+        # NOTE: In-memory only; consider persistence/TTL if large scale
+        self._session_store: dict[str, tuple[dict, List[List[str]]]] = {}
     
     async def start_queue_processor(self):
         """Start the queue processor if it's not already running"""
@@ -179,19 +182,8 @@ class MazeSolver:
                     "position": self._task_queue.qsize()
                 })
             
-            # Validate input data
-            if not isinstance(data, dict):
-                error_msg = f"Invalid data format: expected dictionary, got {type(data).__name__}"
-                print(error_msg)
-                if websocket:
-                    await websocket.send_json({
-                        "type": "internal_error",
-                        "error": error_msg
-                    })
-                return {"type": "internal_error", "error": error_msg}
-            
             # Handle restructured data from frontend
-            if 'largeComponents' not in data:
+            if 'components' not in data:
                 # Check if this is the new structure with nested allConnComponents
                 if 'allConnComponents' in data:
                     # Extract components from the nested structure
@@ -217,7 +209,7 @@ class MazeSolver:
                     
                     # Restructure data to expected format
                     data = {
-                        'largeComponents': components,
+                        'components': components,
                         'dimensions': data.get('dimensions', {}),
                         'session_id': data.get('session_id')  # Preserve session_id during restructuring
                     }
@@ -234,7 +226,7 @@ class MazeSolver:
                             })
                         return {"type": "internal_error", "error": error_msg}
                 else:
-                    error_msg = "Missing required field 'largeComponents' in input data"
+                    error_msg = "Missing required field 'components' in input data"
                     print(error_msg)
                     if websocket:
                         await websocket.send_json({
@@ -243,7 +235,7 @@ class MazeSolver:
                         })
                     return {"type": "internal_error", "error": error_msg}
             
-            if not data['largeComponents']:
+            if not data['components']:
                 error_msg = "No maze components provided"
                 print(error_msg)
                 if websocket:
@@ -283,7 +275,7 @@ class MazeSolver:
             
             # Process each component based on size
             try:
-                for i, component in enumerate(data['largeComponents']):
+                for i, component in enumerate(data['components']):
                     # Skip None components
                     if component is None:
                         print(f"Warning: Component {i} is not a dictionary: {type(component)}")
@@ -384,7 +376,7 @@ class MazeSolver:
             if small_components and not skip_rust:
                 # Create a Rust-compatible data structure
                 rust_data = {
-                    'largeComponents': small_components
+                    'components': small_components
                 }
                 json_small_data = json.dumps(rust_data)
                 
@@ -473,7 +465,7 @@ class MazeSolver:
                         
                         # Create a Rust-compatible data structure
                         rust_data = {
-                            'largeComponents': small_enough_components
+                            'components': small_enough_components
                         }
                         json_fallback_data = json.dumps(rust_data)
                         
@@ -577,7 +569,7 @@ class MazeSolver:
                 or_tools_solutions = []
             
             # Merge solutions from both solvers
-            all_solutions = [None] * len(data['largeComponents'])
+            all_solutions = [None] * len(data['components'])
             
             # Handle edge cases where indices might be empty
             if not small_indices and not large_indices:
@@ -605,7 +597,7 @@ class MazeSolver:
                     # Create a mapping of original indices to solutions
                     solution_map = {idx: sol for idx, sol in zip(small_indices, small_solutions) if idx < len(all_solutions)}
                     # Rebuild the all_solutions array
-                    all_solutions = [solution_map.get(i, []) for i in range(len(data['largeComponents']))]
+                    all_solutions = [solution_map.get(i, []) for i in range(len(data['components']))]
             
             # Ensure no null values in the array
             all_solutions = [solution if solution is not None else [] for solution in all_solutions]
@@ -613,34 +605,40 @@ class MazeSolver:
             # Log solution summary
             solution_lengths = [len(sol) if sol else 0 for sol in all_solutions]
             print(f"Final solution lengths: {solution_lengths}")
-            
-            # Return the solutions
-            solutions_result = all_solutions
+
+            # Cache in Redis for later /visualize/generate requests
+            if data.get("session_id"): await redis_save(data["session_id"], data, all_solutions)
+
             
             # Schedule component report generation as a background task
             # This will happen after we return the solutions to the client
             if websocket and websocket.client_state.CONNECTED:
-                print(f"Scheduling visualization generation for session: {data['session_id']}")
-                # Send solution first
+                # Only send solution; visualization can be requested separately via REST
                 await websocket.send_json({
-                    "type": "solution", 
+                    "type": "solution",
                     "data": all_solutions,
                     "session_id": data.get('session_id')
                 })
-                # Then generate visualization - wait for it to complete
-                await self.generate_component_report(data, all_solutions, websocket)
-                # Return empty list since we already sent the solution via WebSocket
-                return []
+                return {"type": "websocket_handled"}
             else:
-                print("No websocket or client disconnected - skipping visualization generation")
-                return solutions_result
+                # This is the REST/direct call path
+                print("REST/direct call path - generating visualization without WebSocket")
+                session_id = data.get('session_id', f"session_{int(time.time())}_{random.randint(1000, 9999)}")
+                
+                return {
+                    "session_id": session_id,
+                    "data": all_solutions
+                }
             
         except asyncio.CancelledError:
             print("Maze solving cancelled by client disconnect")
-            raise
+            # Re-raise to allow cancellation handling upstream if necessary
+            raise 
         except Exception as e:
             error_message = f"An unexpected error occurred: {str(e)}"
             print(f"Solver error: {error_message}")
+            # For REST calls, we might want to raise an HTTPException here,
+            # but for now, just re-raising to be handled by the caller in main.py
             raise
     
     async def _run_rust_solver(self, json_data, loop, websocket=None):
@@ -661,17 +659,17 @@ class MazeSolver:
                 if not isinstance(parsed_data, dict):
                     raise ValueError(f"Expected dictionary, got {type(parsed_data).__name__}")
                 
-                if 'largeComponents' not in parsed_data:
-                    raise ValueError("Missing 'largeComponents' in data")
+                if 'components' not in parsed_data:
+                    raise ValueError("Missing 'components' in data")
                 
-                if not isinstance(parsed_data['largeComponents'], list):
-                    raise ValueError(f"'largeComponents' must be a list, got {type(parsed_data['largeComponents']).__name__}")
+                if not isinstance(parsed_data['components'], list):
+                    raise ValueError(f"'components' must be a list, got {type(parsed_data['components']).__name__}")
                 
-                if not parsed_data['largeComponents']:
-                    raise ValueError("'largeComponents' list is empty")
+                if not parsed_data['components']:
+                    raise ValueError("'components' list is empty")
                 
                 # Ensure each component is valid
-                for i, component in enumerate(parsed_data['largeComponents']):
+                for i, component in enumerate(parsed_data['components']):
                     if not isinstance(component, dict):
                         raise ValueError(f"Component {i} is not a dictionary")
                     
@@ -703,7 +701,7 @@ class MazeSolver:
                             print("rust_maze_solver module not found. Using fallback to OR-Tools...")
                             
                             # Extract components from the JSON data
-                            components = parsed_data['largeComponents']
+                            components = parsed_data['components']
                             indices = list(range(len(components)))
                             
                             # Use OR-Tools as a fallback
@@ -737,7 +735,7 @@ class MazeSolver:
                             print(f"Available modules that might be relevant: {[m for m in all_modules if 'maze' in m or 'rust' in m]}")
                             
                             # Extract components from the JSON data
-                            components = parsed_data['largeComponents']
+                            components = parsed_data['components']
                             indices = list(range(len(components)))
                             
                             # Use OR-Tools as a fallback
@@ -1357,6 +1355,9 @@ class MazeSolver:
         try:
             if not path:
                 return
+            if self.visualizer is None:
+                print("Visualizer not initialized, skipping visualization")
+                return
             
             # Use our GraphVisualizer for visualization
             self._image_counter += 1
@@ -1408,9 +1409,9 @@ class MazeSolver:
             # Prepare components data for visualization
             components_data = []
             for i, solution in enumerate(all_solutions):
-                if i < len(data['largeComponents']) and solution:
+                if i < len(data['components']) and solution:
                     # Extract component adjacency dict
-                    adjacency = data['largeComponents'][i]
+                    adjacency = data['components'][i]
                     
                     # Create component data
                     component = {
@@ -1432,39 +1433,62 @@ class MazeSolver:
                 return
                 
             # Get dimensions from data
-            dimensions = data.get('dimensions', {'rows': 10, 'cols': 10})
+            dimensions = data.get('dimensions', {'rows': 0, 'cols': 0})
+            if dimensions['rows'] == 0 or dimensions['cols'] == 0:
+                if websocket and websocket.client_state.CONNECTED:
+                    await websocket.send_json({
+                        "type": "visualization_error",
+                        "error": "No dimensions available in the data for visualization"
+                    })
+                return
+                
             
             # Generate the visualization synchronously in this function
             # to ensure it's completed before the connection closes
             print(f"Creating visualization for {len(components_data)} components...")
             # Use the instance visualizer created during __init__
             visualizer = self.visualizer 
-            
-            # Use executor to avoid blocking the event loop with CPU-bound task
-            loop = asyncio.get_running_loop()
-            image_bytes = await loop.run_in_executor(
-                None,
-                lambda: visualizer.create_component_report(
-                    dimensions,
-                    components_data,
-                    return_bytes=True
+            try: 
+                # Use executor to avoid blocking the event loop with CPU-bound task
+                loop = asyncio.get_running_loop()
+                image_bytes = await loop.run_in_executor(
+                    None,
+                    lambda: visualizer.create_component_report(
+                        dimensions,
+                        components_data,
+                        return_bytes=True
+                    )
                 )
-            )
-            print(f"Visualization generated: {len(image_bytes)} bytes")
+                print(f"Visualization generated: {len(image_bytes)} bytes")
+            except Exception as e:
+                print(f"Error generating visualization: {str(e)}")
+                if websocket and websocket.client_state.CONNECTED:
+                    await websocket.send_json({
+                        "type": "visualization_error",
+                        "error": f"Failed to generate visualization: {str(e)}"
+                    })
+                    
+            try:
+                print(f"now uploading visualization to GCS bucket '{bucket_name}', blob '{blob_name}'...")
             
-            # Upload to GCS
-            bucket_name = os.environ.get("GCS_BUCKET_NAME", "maze-solver-visualizations")
-            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            blob_name = f"visualizations/{session_id}/{timestamp}.png"
-            
-            print(f"Uploading visualization to GCS bucket '{bucket_name}', blob '{blob_name}'...")
-            # Upload in a non-blocking way but wait for completion
-            url = await loop.run_in_executor(
-                None,
-                lambda: upload_bytes_to_gcs(bucket_name, blob_name, image_bytes)
-            )
-            
-            print(f"Component report uploaded to: {url}")
+                # Upload to GCS
+                bucket_name = os.environ.get("GCS_BUCKET_NAME", "maze-solver-visualizations")
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                blob_name = f"visualizations/{session_id}/{timestamp}.png"
+                # Upload in a non-blocking way but wait for completion
+                url = await loop.run_in_executor(
+                    None,
+                    lambda: upload_bytes_to_gcs(bucket_name, blob_name, image_bytes)
+                )
+                
+                print(f"Component report uploaded to: {url}")
+            except Exception as e:
+                print(f"Error uploading component report: {str(e)}")
+                if websocket and websocket.client_state.CONNECTED:
+                    await websocket.send_json({
+                        "type": "visualization_error",
+                        "error": f"Failed to upload visualization: {str(e)}"
+                    })
             
             # Notify client if WebSocket is still connected
             if websocket and websocket.client_state.CONNECTED:
@@ -1474,7 +1498,7 @@ class MazeSolver:
                     "url": url,
                     "session_id": session_id,
                     "timestamp": timestamp,
-                    "access_url": f"/api/visualize/maze/{session_id}/latest"
+                    "access_url": f"/api/visualize/{session_id}"
                 })
                 print("Visualization message sent successfully")
             else:
@@ -1662,4 +1686,97 @@ class MazeSolver:
         sol = [(idx_to_node[i], solver.Value(rank[i])) for i in range(n) if solver.Value(rank[i]) >= 0]
         sol.sort(key=lambda x: x[1])
         return [node for node, _ in sol]
+
+    async def _generate_component_report_for_rest(self, data: dict, all_solutions: List[List[str]]) -> dict:
+        """
+        Generate component report for REST API calls without WebSocket messaging.
+        Returns visualization metadata instead of sending WebSocket messages.
+        """
+        try:
+            print("Generating component report visualization for REST API...")
+            
+            # Get session ID, generating one if not provided
+            session_id = data.get('session_id')
+            if not session_id:
+                session_id = f"session_{int(time.time())}_{random.randint(1000, 9999)}"
+                print(f"No session_id provided, generated new one: {session_id}")
+            
+            # Prepare components data for visualization (same as in generate_component_report)
+            components_data = []
+            for i, solution in enumerate(all_solutions):
+                if i < len(data['components']) and solution:
+                    # Extract component adjacency dict
+                    adjacency = data['components'][i]
+                    
+                    # Create component data
+                    component = {
+                        'id': i + 1,  # 1-indexed for display
+                        'nodes': list(adjacency.keys()),
+                        'adjacency': adjacency,
+                        'longest_path': solution
+                    }
+                    components_data.append(component)
+            
+            # Skip if no components with solutions
+            if not components_data:
+                print("No components with solutions to visualize")
+                return {"status": "no_components"}
+            
+            # Get dimensions from data
+            dimensions = data.get('dimensions', {'rows': 0, 'cols': 0})
+            if dimensions['rows'] == 0 or dimensions['cols'] == 0:
+                print("No dimensions available for visualization")
+                return {"status": "no_dimensions"}
+            
+            # Generate the visualization
+            print(f"Creating visualization for {len(components_data)} components...")
+            visualizer = self.visualizer 
+            try:
+                # Use executor to avoid blocking the event loop
+                loop = asyncio.get_running_loop()
+                image_bytes = await loop.run_in_executor(
+                    None,
+                    lambda: visualizer.create_component_report(
+                        dimensions,
+                        components_data,
+                        return_bytes=True
+                    )
+                )
+                print(f"Visualization generated: {len(image_bytes)} bytes")
+            except Exception as e:
+                print(f"Error generating visualization: {str(e)}")
+                return {"status": "visualization_error", "error": str(e)}
+            
+            try:
+                # Upload to GCS
+                bucket_name = os.environ.get("GCS_BUCKET_NAME", "maze-solver-visualizations")
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                blob_name = f"visualizations/{session_id}/{timestamp}.png"
+                
+                # Upload in a non-blocking way but wait for completion
+                url = await loop.run_in_executor(
+                    None,
+                    lambda: upload_bytes_to_gcs(bucket_name, blob_name, image_bytes)
+                )
+                
+                print(f"Component report uploaded to: {url}")
+                
+                # Return visualization metadata
+                return {
+                    "status": "success",
+                    "url": url,
+                    "session_id": session_id,
+                    "timestamp": timestamp,
+                    "access_url": f"/api/visualize/{session_id}"
+                }
+                
+            except Exception as e:
+                print(f"Error uploading component report: {str(e)}")
+                return {"status": "upload_error", "error": str(e)}
+            
+        except Exception as e:
+            print(f"Error generating component report for REST: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {"status": "error", "error": str(e)}
 

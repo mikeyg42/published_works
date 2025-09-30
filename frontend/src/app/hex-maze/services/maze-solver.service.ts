@@ -1,7 +1,8 @@
 // maze-solver.service.ts
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { Injectable, Inject, PLATFORM_ID } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { BehaviorSubject } from 'rxjs';
+import { BehaviorSubject, firstValueFrom } from 'rxjs';
 import { PathCell, PathMap } from './maze-generator.service';
 import Graph from 'graphology';
 import { Color, formatHex8, converter, parseHex, interpolatorSplineNatural, clampGamut, fixupHueIncreasing} from 'culori';
@@ -24,9 +25,10 @@ interface ConnComponent {
   };
 }
 
-export interface ProcessedConnComponent extends ConnComponent {
+export interface ProcessedConnComponent{
   pathLength: number;
   path:string[]; // ["1" ,"6", "27", "2", ... ]
+  connComponent: ConnComponent;
 }
 
 interface PathStyle {
@@ -53,6 +55,19 @@ interface ConnComponentCell {
 
 const COMPONENT_SIZE_THRESHOLD = 8
 
+interface OutgoingPayload {
+  components: Record<string, string[]>[];
+  dimensions: {
+    rows: number;
+    cols: number;
+  };
+}
+
+interface ReturnedPayload {
+  session_id: string;
+  data: string[][];
+}
+
 @Injectable({
   providedIn: 'root',
 })
@@ -70,65 +85,108 @@ export class MazeSolverService {
   constructor(
     @Inject(PLATFORM_ID) private platformId: Object,
     private http: HttpClient
-  ) {
+  ) {}
+
+  /* ────────────────────────────────────────────────────────────────────────── */
+  /* PUBLIC API                                                                */
+  /* ────────────────────────────────────────────────────────────────────────── */
+  async solveMaze(pathMap: PathMap): Promise<[ProcessedConnComponent[], string]> {
+    // build graphology graph from pathMap
+    const graph = new Graph({ type: 'undirected', multi: false});
+    pathMap.cells.forEach(c => graph.addNode(c.linearId.toString()));
+    pathMap.edges.forEach(e => graph.addEdge(e.from.toString(), e.to.toString()));
+
+    const connComponents = this.findConnectedComponents(graph, pathMap.cells);
+    const allForBackend = connComponents.map(c => ({ adjacencyList: this.toAdj(c) }));
+
+    const payload: OutgoingPayload = {
+      components: allForBackend.map(c => c.adjacencyList),
+      dimensions: pathMap.dimensions
+    };
+
+    // Fetch the full payload including session_id and data
+    const returnedPayload = await (environment.preferWebsocket ? this.tryWebsocketThenRest(payload) : this.solveViaRest(payload));
+
+    const processedComponents = this.mergeSolutions(connComponents, returnedPayload);
+
+    // Return the processed components and the session_id
+    return [processedComponents, returnedPayload.session_id];
   }
 
-  async solveMaze(
-    pathMap: PathMap
-  ): Promise<ProcessedConnComponent[]> {
-
-    // Find connected connComponents once
-    const graph = new Graph({ type: 'undirected', multi: false});
-          // Add nodes 
-    pathMap.cells.forEach(cell => {
-      graph.addNode(cell.linearId.toString());
-    });
-      
-    // Add edges
-    pathMap.edges.forEach(edge => {
-      graph.addEdge(edge.from.toString(), edge.to.toString());
-    });
-
-    // Find connected connComponents
-    const connComponents = this.findConnectedConnComponents(graph, pathMap.cells);
-    
-    const allConnComponents = this.analyzeConnComponents(connComponents, graph).allConnComponents;
-    
-    const remoteResults = allConnComponents?.length > 0
-      ? await this.solveRemotely(allConnComponents.map(comp => ({ adjacencyList: comp.adjacencyList })), pathMap)
-      : [];
-
-    const processedConnComponents: ProcessedConnComponent[] = [];
-
-    remoteResults.forEach(path => {
-      if (path.length === 0) return;
-
-      const firstNode = path[0];
-
-      // Find the connected component containing the first node of the path
-      const matchingComponent = connComponents.find(cc =>
-        cc.pixels.some(pixel => pixel.linearId.toString() === firstNode)
-      );
-
-      if (!matchingComponent) {
-        console.warn(`No matching component found for path starting with node ${firstNode}`);
-        return;
+  /* ────────────────────────────────────────────────────────────────────────── */
+  /* TRANSPORTS                                                                */
+  /* ────────────────────────────────────────────────────────────────────────── */
+  private tryWebsocketThenRest(payload: any): Promise<ReturnedPayload> {
+    return new Promise(async (resolve) => {
+      try {
+        const wsResult = await this.solveViaWebsocket(payload);
+        resolve(wsResult);
+      } catch (e) {
+        console.warn('WS failed, falling back to HTTPS ➜', e);
+        const restResult = await this.solveViaRest(payload);
+        resolve(restResult);
       }
+    });
+  }
 
-      // Merge path data into the matching component
-      const procConnComponent: ProcessedConnComponent = {
-        ...matchingComponent,
-        path: path,
-        pathLength: path.length
+  private solveViaRest(body: OutgoingPayload): Promise<ReturnedPayload> {
+
+    return firstValueFrom(
+      this.http.post<ReturnedPayload>(environment.restUrl, body)
+    );
+  }
+
+  private solveViaWebsocket(body: any): Promise<ReturnedPayload> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(environment.websocketUrl);
+      const timer = setTimeout(() => {
+        ws.close();
+        reject(new Error('WebSocket timeout'));
+      }, 60000); // Consider making timeout configurable
+
+      ws.onopen = () => ws.send(JSON.stringify(body));
+
+      ws.onmessage = ev => {
+        try {
+          const msg = JSON.parse(ev.data);
+          // Expect session_id and data in the message
+          if (msg.type === 'solution' && msg.session_id && msg.data) {
+            clearTimeout(timer);
+            ws.close();
+            // Resolve with the full ReturnedPayload object
+            resolve({
+              session_id: msg.session_id,
+              data: msg.data as string[][]
+            });
+          } else if (msg.type === 'error') {
+            // Handle potential backend errors explicitly
+             clearTimeout(timer);
+             ws.close();
+             console.error('WebSocket error message:', msg.error || 'Unknown error');
+             reject(new Error(msg.error || 'WebSocket returned an error'));
+          } else {
+             // Handle unexpected message format
+             console.warn('Received unexpected WebSocket message format:', msg);
+             // Optionally reject or ignore, depending on desired robustness
+          }
+        } catch (parseError) {
+          clearTimeout(timer);
+          ws.close();
+          console.error('Failed to parse WebSocket message:', ev.data, parseError);
+          reject(new Error('Failed to parse WebSocket message'));
+        }
       };
 
-      processedConnComponents.push(procConnComponent);
+      ws.onerror = err => {
+        clearTimeout(timer);
+        ws.close();
+        // Reject with the actual error event
+        reject(err);
+      };
     });
-
-    return processedConnComponents;
   }
 
-  private findConnectedConnComponents(graph: Graph, cells: PathCell[]): ConnComponent[] {
+  private findConnectedComponents(graph: Graph, cells: PathCell[]): ConnComponent[] {
     const visited = new Set<string>();
     const connComponents: ConnComponent[] = [];
     
@@ -229,52 +287,6 @@ export class MazeSolverService {
     return false;
   }
 
-// This function analyzes the connComponents in the pathMap and returns a list of large and small connComponents
-  private analyzeConnComponents(connComponents: ConnComponent[], graph: Graph): { 
-    allConnComponents: { 
-      connComponent: ConnComponent, 
-      size: number, 
-      adjacencyList: Record<string, { 
-        neighbors: string[], 
-        position: { row: number, col: number } 
-      }>, 
-      graph: Graph 
-    }[],
-  } {
-    const allConnComponents: any[] = [];
-
-    connComponents.forEach(connComponent => {
-      if (connComponent.size < COMPONENT_SIZE_THRESHOLD) {
-        return;
-      }
-      const subgraph = this.createSubgraph(connComponent.pixels.map(c => c.linearId.toString()), graph);
-      
-      // Create enhanced adjacency list with position information
-      const adjacencyList: Record<string, { 
-        neighbors: string[], 
-        position: { row: number, col: number } 
-      }> = {};
-
-      connComponent.pixels.forEach(pixel => {
-        adjacencyList[pixel.linearId.toString()] = {
-          neighbors: subgraph.neighbors(pixel.linearId.toString()),
-          position: {
-            row: pixel.position.row,
-            col: pixel.position.col
-          }
-        };
-      });
-    
-      allConnComponents.push({
-          connComponent: connComponent,
-          size: connComponent.size,
-          adjacencyList: adjacencyList,
-          graph: subgraph
-      });
-    });
-
-    return { allConnComponents };
-  }
 
   private calculateBounds(xCoords: number[], yCoords: number[]): ConnComponent['bounds'] {
     const minX = Math.min(...xCoords)-this.hexSize*0.866;
@@ -283,9 +295,8 @@ export class MazeSolverService {
     const maxY = Math.max(...yCoords)+this.hexSize;
     return { minX, maxX, minY, maxY };
   }
-
-
-  private createSubgraph(nodeList: string[], graph: Graph): Graph {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+/*   private createSubgraph(nodeList: string[], graph: Graph): Graph {
     // Create an empty subgraph
     const subgraph = new Graph();
     const subgraphNodes = new Set(nodeList);
@@ -305,186 +316,78 @@ export class MazeSolverService {
       }
     });
     return subgraph;
+  } */
+
+    /* ------------------------------------------------------------------ */
+  /* DATA SHAPING                                                        */
+  /* ------------------------------------------------------------------ */
+
+  /** Convert a ConnComponent into the adjacency‑list object expected by backend */
+  private toAdj(component: ConnComponent): Record<string, string[]> {
+    const idsInComponent = new Set(component.pixels.map(p => p.linearId.toString()));
+    const adj: Record<string, string[]> = {};
+    component.pixels.forEach(p => {
+      const id = p.linearId.toString();
+      // Ensure neighbors is not null before filtering
+      const nbrs = (p.neighbors ?? []).filter(n => idsInComponent.has(n));
+      adj[id] = nbrs;
+    });
+    return adj;
   }
 
-private async solveRemotely(
-  connComponents: { 
-    adjacencyList: Record<string, { 
-      neighbors: string[], 
-      position: { row: number, col: number } 
-    }> 
-  }[], pathMap: PathMap
-): Promise<string[][]> {
-  // Format the payload for the backend
-  const payload = JSON.stringify({
-    largeComponents: connComponents.map(comp => {
-      // Convert enhanced adjacency list back to simple format expected by backend
-      const simpleAdjList: Record<string, string[]> = {};
-      Object.entries(comp.adjacencyList).forEach(([nodeId, data]) => {
-        simpleAdjList[nodeId] = data.neighbors;
+  /**
+   * Bring backend longest‑paths back into the original ConnComponent objects,
+   * validating the correspondence between paths and components.
+   */
+  private mergeSolutions(
+    components: ConnComponent[],
+    solutionPayload: ReturnedPayload // Now accepts the full payload
+  ): ProcessedConnComponent[] {
+    const processed: ProcessedConnComponent[] = [];
+    const solutionPaths = solutionPayload.data; // Extract paths
+
+    if (components.length !== solutionPaths.length) {
+       console.error(`CRITICAL VALIDATION FAILED: Mismatched lengths between components (${components.length}) and solution paths (${solutionPaths.length}). Session ID: ${solutionPayload.session_id}`);
+       throw new Error('Component and solution path counts do not match.');
+    }
+
+    // --- Validation Step ---
+    for (let i = 0; i < components.length; i++) {
+      const comp = components[i];
+      const path = solutionPaths[i]; // Path can be empty []
+
+      // Only validate if the path is not empty
+      if (path && path.length > 0) {
+        const firstLinearId = path[0];
+        // Create a set for efficient lookup of linearIds in the current component
+        const componentLinearIds = new Set(comp.pixels.map(p => p.linearId.toString()));
+
+        // Check if the first ID in the path exists in the component
+        if (!componentLinearIds.has(firstLinearId)) {
+          console.error(`CRITICAL VALIDATION FAILED: Path ${i}'s first element (${firstLinearId}) not found in component ${i}. Session ID: ${solutionPayload.session_id}`, { component: comp, path: path });
+          // Decide how to handle: throw an error to stop processing
+          throw new Error(`Data validation failed: Path ${i} does not correspond to component ${i}.`);
+        }
+      }
+    }
+    // --- End Validation Step ---
+
+
+    // If validation passes, proceed with merging
+    for (let i = 0; i < components.length; i++) {
+      const comp = components[i];
+      // Ensure path exists, default to empty array if not
+      const path = (solutionPaths && solutionPaths[i]) ? solutionPaths[i] : [];
+
+      processed.push({
+        connComponent: comp,
+        path: path,
+        pathLength: path.length
       });
-      return simpleAdjList;
-    }),
-    dimensions: pathMap.dimensions
-  });
-  
-  console.log('Attempting to connect to WebSocket at:', environment.websocketUrl);
-  const ws = new WebSocket(environment.websocketUrl);
+    }
+    return processed;
+  }
 
-  return new Promise((resolve, reject) => {
-    let timeout: NodeJS.Timeout | null = null;
-    let connectionAttempted = false;
-    let connectionTimeoutId: NodeJS.Timeout | null = null;
-
-    const cleanup = (timerId: NodeJS.Timeout | null) => {
-      if (timerId) clearTimeout(timerId);
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-          console.debug('Cleaning up and closing WebSocket.');
-          ws.close();
-      }
-    };
-
-    // Connection attempt timeout
-    connectionTimeoutId = setTimeout(() => {
-      connectionTimeoutId = null;
-      if (!connectionAttempted) {
-        console.error('WebSocket connection attempt timed out after 10 seconds');
-        cleanup(timeout);
-        reject(new Error('WebSocket connection attempt timed out after 10 seconds'));
-      }
-    }, 10000); // Increased connection timeout
-
-    ws.onopen = () => {
-      connectionAttempted = true;
-      if (connectionTimeoutId) clearTimeout(connectionTimeoutId);
-      connectionTimeoutId = null;
-      console.log('WebSocket connected successfully. Sending payload...');
-      
-      // Operation timeout
-      timeout = setTimeout(() => {
-        timeout = null;
-        console.error('WebSocket operation timed out after 60 seconds (no solution received)');
-        cleanup(connectionTimeoutId);
-        reject(new Error('WebSocket operation timed out after 60 seconds'));
-      }, 60000); 
-
-      try {
-        ws.send(payload);
-        console.log('Payload sent successfully');
-      } catch (err) {
-        console.error('Error sending payload:', err);
-        cleanup(timeout);
-        cleanup(connectionTimeoutId);
-        reject(err);
-      }
-    };
-
-    ws.onmessage = (event) => {
-      let receivedData: any;
-      try {
-        console.debug('Received WebSocket message:', event.data);
-        receivedData = JSON.parse(event.data);
-
-        // --- Expect only the 'solution' message type --- 
-        if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'solution') {
-            if (Array.isArray(receivedData.data) && typeof receivedData.session_id === 'string') {
-                const solutionPaths: string[][] = receivedData.data;
-                const sessionId: string = receivedData.session_id;
-                
-                console.log(`Received solution for session: ${sessionId}`);
-                cleanup(timeout); // Clear operation timeout
-                cleanup(connectionTimeoutId); // Clear connection timeout just in case
-                
-                // 1. Resolve the promise with the solution paths
-                resolve(solutionPaths);
-                
-                // 2. Trigger visualization request (fire and forget)
-                const visualizeUrl = `${environment.visualizeUrl(sessionId)}`;
-                console.log(`Triggering visualization GET request to: ${visualizeUrl}`);
-                this.http.get(visualizeUrl, { responseType: 'blob' }) // Expecting an image/blob
-                    .subscribe({
-                        next: () => console.log(`Successfully triggered visualization for ${sessionId}`),
-                        error: (err) => console.error(`Error triggering visualization for ${sessionId}:`, err)
-                    });
-                    
-                // 3. Close the WebSocket (explicitly, though cleanup might already do it)
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.close();
-                }
-                return; // Processing done for this message
-            } else {
-                throw new Error(`Invalid 'solution' message format. Missing or incorrect 'data' or 'session_id'.`);
-            }
-        }
-        // --- Handle other expected informational message types --- 
-        else if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'queued'){
-            console.log(`Task queued - ID: ${receivedData.task_id}, Position: ${receivedData.position}`);
-            // Keep waiting
-        }
-        else if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'processing_started'){
-            console.log(`Processing started for session: ${receivedData.session_id}`);
-            // Keep waiting
-        }
-        // --- Handle Visualization Ready (Optional, but good practice) ---
-        else if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'visualization_ready'){
-            console.log(`Visualization ready message received for session ${receivedData.session_id}. URL: ${receivedData.url}`);
-            // You could potentially use receivedData.url here if needed, 
-            // but we are already triggering the GET request above.
-            // Close WS if not already closed
-            cleanup(timeout);
-            cleanup(connectionTimeoutId);
-        }
-         // --- Handle errors from backend --- 
-        else if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'internal_error') {
-           throw new Error(`Server error: ${receivedData.error || 'Unknown error'}`);
-        }
-        // --- Handle visualization errors --- 
-        else if (typeof receivedData === 'object' && receivedData !== null && receivedData.type === 'visualization_error') {
-           console.error(`Backend reported visualization error: ${receivedData.error || 'Unknown error'}`);
-           // Don't reject the main promise, just log the error.
-           // Visualization might be secondary to the solution itself.
-        }
-        // --- Reject unexpected formats --- 
-        else {
-            console.warn('Received unexpected data format:', receivedData);
-            // Optionally reject or just ignore, depending on requirements
-            // throw new Error(`Unexpected WebSocket message format: ${JSON.stringify(receivedData)}`); 
-        }
-
-      } catch (error) {
-        console.error('Error processing WebSocket message:', error);
-        cleanup(timeout);
-        cleanup(connectionTimeoutId);
-        reject(error);
-      }
-    };
-  
-    ws.onerror = (error) => {
-      // Use 'event' instead of 'error' which might not be standard
-      const errorEvent = error instanceof Event ? error : null;
-      console.error('WebSocket error event:', errorEvent);
-      console.error('WebSocket connection failed. Check backend server and network.');
-      console.error('Backend URL attempted:', environment.websocketUrl);
-      cleanup(timeout);
-      cleanup(connectionTimeoutId); 
-      reject(new Error('WebSocket connection error. See console for details.'));
-    };
-
-    ws.onclose = (event) => {
-      console.debug(`WebSocket closed: Code=${event.code}, Reason=${event.reason || 'N/A'}, Clean=${event.wasClean}`);
-      // Ensure timers are cleared on close, regardless of how it closed
-      cleanup(timeout);
-      cleanup(connectionTimeoutId);
-      // If connection was never established, reject the promise
-      if (!connectionAttempted && !event.wasClean) {
-           reject(new Error(`WebSocket connection closed unexpectedly: Code=${event.code}`));
-      }
-      // If the promise hasn't been resolved yet (e.g., closed before solution received), reject it.
-      // Note: Need a flag to track if promise was resolved to avoid rejecting after success.
-      // Let's assume the timeout handles the case where no solution is received.
-    };
-  });
-}
 }
 
 export type LchColor = Color & {

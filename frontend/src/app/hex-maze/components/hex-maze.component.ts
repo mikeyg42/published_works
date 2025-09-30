@@ -48,6 +48,8 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
 
   // Animation and solved paths
   private solvedComponents: ProcessedConnComponent[] = [];
+  private sessionId: string | null = null;
+
   private animationFrameId: number | null = null;
 
   // Window resize handling
@@ -63,13 +65,13 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
     private mazeGenerator: MazeGeneratorService,
     private ngZone: NgZone,
     private vonGridService: VonGridService,
-    private pathTracerService: PathTracerService,
+    public pathTracerService: PathTracerService,
     private injector: Injector
   ) {}
 
   ngOnInit(): void {
 
-    this.initializeVisualizer();
+    this.initialize3DVisualizer();
     
     // Subscribe to window resize events
     this.resizeSubscription = fromEvent(window, 'resize')
@@ -92,11 +94,11 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
       width: window.innerWidth,
       height: window.innerHeight
     };
-    
-    this.generateNewMaze();
-  
   }
-
+  showWebGPUError(msg: string) {
+    // You can use Angular Material Snackbar, a modal, or just set a variable for the template
+    alert('WebGPU Error: ' + msg);
+  }
   ngOnDestroy(): void {
     if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId);
@@ -112,34 +114,42 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
 
   /**
    * Initialize the 3D visualizer by creating a new MainAnimation instance
+   * CRASH PREVENTION: Prevents duplicate initialization
    */
-  async initializeVisualizer(): Promise<void> {
+  async initialize3DVisualizer(): Promise<void> {
+    // CRASH PREVENTION: Prevent duplicate initialization
+    if (this.mazeAnimator) {
+      console.warn('3D visualizer already initialized, skipping...');
+      return;
+    }
+    
     const container = this.mazeCanvasRef.nativeElement;
     
-    // Create a canvas element for MainAnimation
-    const canvas = document.createElement('canvas');
-    canvas.style.width = '100%';
-    canvas.style.height = '100%';
-    container.appendChild(canvas);
-    
-    // Create MainAnimation instance with the canvas
+    // Create MainAnimation instance - it will create its own canvas via MazeSceneManager
     this.ngZone.runOutsideAngular(() => {
       this.mazeAnimator = new MainAnimation(
-        canvas,
         container,
         this.ngZone,
         this.vonGridService,
         this.pathTracerService
       );
       
+      // Wait for the underlying SceneManager to finish initialization
+      this.mazeAnimator.initializedPromise.then(() => {
       this.initialized = this.mazeAnimator?.isInitialized() || false;
-    });
-    
-    if (this.initialized && this.mazeAnimator) {
-      this.statusMessage = `Renderer: ${this.mazeAnimator.isUsingWebGPU() ? 'WebGPU' : 'WebGL'}`;
-    } else {
-      this.statusMessage = 'Failed to initialize 3D renderer';
+        if (this.initialized) {
+          // Now that everything is ready, generate the maze
+          this.ngZone.run(() => this.generateNewMaze());
+        }
+      }).catch(error => {
+        console.error('Failed to initialize 3D visualizer:', error);
+        // CRASH PREVENTION: Clean up on failure
+        if (this.mazeAnimator) {
+          this.mazeAnimator.dispose();
+          this.mazeAnimator = null;
     }
+      });
+    });
   }
 
   /**
@@ -156,7 +166,9 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
 
     try {
       this.isGenerating = true;
-      this.statusMessage = 'Generating maze...';
+      this.isLoading = true;
+      this.isAnimating = false;
+      this.statusMessage = 'Generating 3D maze and solving...';
 
       const container = this.mazeCanvasRef.nativeElement;
       this.width = container.clientWidth;
@@ -173,19 +185,25 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
       // Short delay to allow the maze to be drawn (if needed)
       await new Promise(resolve => setTimeout(resolve, 400));
 
-      // Render the 3D maze.
-      await this.mazeAnimator.createMaze(this.pathMap);
+      // Start both operations in parallel and wait for them to finish
+      await Promise.all([
+        this.mazeAnimator.createMaze(this.pathMap), // Render the 3D maze
+        this.solveMaze()                             // Solve the maze
+      ]);
 
-      this.statusMessage = 'Solving maze...';
-      
-      // Solve the maze.
-      await this.solveMaze();
+      // Now that the maze is drawn and solutions are ready, animate them.
+      this.isAnimating = true; // Maybe set this before or after animation starts? Depends on desired UI behavior.
+      this.statusMessage = 'Animating solution...';
+      await this.animateMaze(); // Animate the solution paths.
 
-      // Animate the solution paths.
-      await this.animateMaze();
+      // Animation finished (or started, if animateMaze doesn't block until done)
+      this.isAnimating = false; // Set to false when animation is complete
+      this.statusMessage = 'animation finished!';
+
       
     } finally {
       this.isGenerating = false;
+      this.isLoading = false;
     }
     
   }
@@ -204,9 +222,11 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
       }
       
       // Solve the maze.
-      this.solvedComponents = await this.mazeSolver.solveMaze(this.pathMap);
+      const [solvedComponents, sessionId] = await this.mazeSolver.solveMaze(this.pathMap);
+      this.solvedComponents = solvedComponents;
+      this.sessionId = sessionId;
     
-      this.statusMessage = `Found ${this.solvedComponents.length} solution path(s)`;
+      this.statusMessage = `Found ${this.solvedComponents.length} solution path(s) for session ${sessionId}`;
       return ;
     } catch (error) {
       console.error('Maze solving error:', error);
@@ -214,20 +234,23 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
   private async animateMaze(): Promise<void> {
-    if (!this.solvedComponents || !this.mazeAnimator) {
+    // 1) Fast guard clauses
+    if (!this.mazeAnimator) {
+      this.statusMessage = 'Renderer not ready';
+      return;
+    }
+    if (!this.solvedComponents?.length) {
       this.statusMessage = 'No maze to animate';
       return;
     }
+
+    // 2) Do the animation
     try {
-      if (this.isGenerating) {
-        await this.mazeAnimator.animatePaths(this.solvedComponents);
-      } else {
-        this.statusMessage = 'Maze is not generating';
-        console.error('Maze is not generating');
-      }
+      await this.mazeAnimator.animatePaths(this.solvedComponents);
     } catch (error) {
-        console.error('Maze animation error:', error);
-        this.statusMessage = `Animation error: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      console.error('Maze animation error:', error);
+      this.statusMessage =
+        `Animation error: ${error instanceof Error ? error.message : 'Unknown error'}`;
     }
   }
   

@@ -18,23 +18,20 @@ import { PathTracerService } from './pathTracing_webgpu.service';
 @Injectable()
 export class MainAnimation {
   private sceneManager: MazeSceneManager;
-  private animationFrameId: number | null = null;
-  private lastTime: number = 0;
   private isRunning: boolean = false;
   private resizeObserver: ResizeObserver | null = null;
   private ngZone: NgZone;
   private containerElement: HTMLElement;
+  public initializedPromise: Promise<void>;
 
   /**
    * Creates an animation controller that manages the scene lifecycle
-   * @param canvas The canvas element to render to
    * @param containerElement The container for resize observations
    * @param ngZone Angular zone for running outside Angular
    * @param vonGridService Von-grid service for maze generation
    * @param PathTracerService Path tracing service for WebGPU rendering
    */
   constructor(
-    canvas: HTMLCanvasElement, 
     containerElement: HTMLElement,
     ngZone: NgZone,
     vonGridService: VonGridService,
@@ -43,14 +40,14 @@ export class MainAnimation {
     this.ngZone = ngZone;
     this.containerElement = containerElement;
     
-    // Create the scene manager with all required dependencies
+    // Create the scene manager PROPERLY
     this.sceneManager = new MazeSceneManager(ngZone, vonGridService, pathTracerService);
     
-    // Set up resize observer
+    // Initialize scene BEFORE setting up other components
+    this.initializedPromise = this.initializeScene(containerElement).then(() => {
     this.setupResizeObserver(containerElement);
-    
-    // Initialize the scene manager
-    this.initializeScene(containerElement);
+      this.start(); // Start animation loop only after initialization
+    });
   }
 
   /**
@@ -62,7 +59,7 @@ export class MainAnimation {
   }
 
   /**
-   * Start the animation loop
+   * Start the animation - delegates to scene manager since it has its own animation loop
    */
   public start(): Promise<void> {
     return new Promise<void>(resolve => {
@@ -71,43 +68,21 @@ export class MainAnimation {
         return;
       }
       
-      console.log('Starting animation loop');
+      console.log('MainAnimation start - delegating to MazeSceneManager');
       this.isRunning = true;
-      this.lastTime = 0;
       
-      this.ngZone.runOutsideAngular(() => {
-        this.animate(0);
-        setTimeout(resolve, 100); // Give time for first few frames
-      });
+      // No animation loop needed here - MazeSceneManager handles all animations
+      // through its AnimationManager
+      setTimeout(resolve, 100);
     });
   }
 
   /**
-   * Stop the animation loop
+   * Stop the animation - clean up any remaining resources
    */
   public stop(): void {
     this.isRunning = false;
-    if (this.animationFrameId !== null) {
-      cancelAnimationFrame(this.animationFrameId);
-      this.animationFrameId = null;
-    }
-  }
-
-  /**
-   * Animation frame callback
-   */
-  private animate = (time: number): void => {
-    if (!this.isRunning) return;
-    
-    this.animationFrameId = requestAnimationFrame(this.animate);
-    
-    // The update method is no longer needed as the scene manager has its own animation loop
-    // We just need to ensure it's running
-    try {
-      // We don't need to call update as the service manages its own animation
-    } catch (error) {
-      console.error("Animation error:", error);
-    }
+    // No animation frame to cancel since we removed the redundant loop
   }
 
   /**

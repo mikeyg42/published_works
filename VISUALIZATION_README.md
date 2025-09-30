@@ -38,7 +38,7 @@ The backend sends the following WebSocket message types:
 The visualization can also be accessed via a RESTful API endpoint:
 
 ```
-GET /api/visualize/maze/{session_id}/latest
+GET /api/visualize/{session_id}
 ```
 
 This endpoint either:

@@ -11,7 +11,7 @@ import { LightingAnimator } from './lighting-animator';
 import { AnimationManager } from './animation-manager';
 import { PathAnimator } from './path-animator';
 import { VG } from 'src/assets/js/hex-grid';
-
+import WebGPURenderer from 'three/src/renderers/webgpu/WebGPURenderer.js';
 // Expose THREE on window (for legacy compatibility)
 declare global {
   interface Window { 
@@ -36,7 +36,7 @@ if (typeof window !== 'undefined') { window.THREE = THREE; }
 })
 export class MazeSceneManager {
   // Core THREE.js components
-  private renderer: THREE.WebGPURenderer | null = null;
+  private renderer: InstanceType<typeof WebGPURenderer> | null = null; 
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
   // Used for temporary storage of the scene manager returned by vonGridService.createScene
@@ -136,49 +136,83 @@ export class MazeSceneManager {
       console.log('Initializing MazeSceneManager...');
       this.container = container;
       
-      // Check if WebGPU is available
-      const hasWebGPU = typeof navigator !== 'undefined' && !!navigator.gpu;
-      if (!hasWebGPU) {
-        console.error('WebGPU is required but not available in this browser');
-        return false;
-      }
-      
       // Step 1: Load required scripts
       if (!await this.loadVonGridScript()) {
         console.error('Failed to load von-grid script');
         return false;
       }
       
-      // Step 2: Create renderer and scene
+      // Step 2: Create renderer and scene (this creates the WebGPU device)
       if (!await this.setupRendererAndScene(container)) {
         console.error('Failed to setup renderer and scene');
         return false;
       }
       
-      // Step 3: Initialize path tracer
-      if (this.pathTracer) {
-        await this.pathTracer.initialize(container);
-        console.log(' path tracer initialized successfully');
-        
-        // Step 4: Initialize basic components
-        await this.initializeBasicComponents();
-        
-        // Step 5: Load materials
-        await this.loadMaterials();
-        
-        // Step 6: Setup event handlers and animation system
-        this.setupResizeObserver();
-        this.initializeAnimationSystem();
-        await this.startAnimationLoop();
+      // Step 3: Initialize path tracer with shared device
+      if (this.pathTracer && this.gpuDevice) {
+        await this.pathTracer.initializeWithDevice(container, this.gpuDevice);
+        console.log('Path tracer initialized with shared WebGPU device');
+      } else if (this.pathTracer) {
+        console.error('No WebGPU device available for path tracer');
+        return false;
       }
       
-      console.log('MazeSceneManager initialization complete');
+      // Step 4: Continue with rest of initialization
+      await this.initializeBasicComponents();
+      await this.loadMaterials();
+      this.setupResizeObserver();
+      this.initializeAnimationSystem();
+      await this.startAnimationLoop();
+      
       this.initialized = true;
       return true;
     } catch (error) {
       console.error('Critical error during MazeSceneManager initialization:', error);
       return false;
     }
+  }
+
+  /**
+   * Extract WebGPU device from the renderer for sharing
+   */
+  private getWebGPUDevice(): GPUDevice | null {
+    if (this.renderer && this.usingWebGPU) {
+      // Access the internal WebGPU device from the renderer
+      // The WebGPURenderer stores the device internally
+      const webgpuRenderer = this.renderer as any;
+      
+      // Try different possible property names where the device might be stored
+      if (webgpuRenderer._device) {
+        return webgpuRenderer._device;
+      }
+      if (webgpuRenderer.device) {
+        return webgpuRenderer.device;
+      }
+      if (webgpuRenderer.backend && webgpuRenderer.backend.device) {
+        return webgpuRenderer.backend.device;
+      }
+      if (webgpuRenderer.getDevice && typeof webgpuRenderer.getDevice === 'function') {
+        return webgpuRenderer.getDevice();
+      }
+      
+      // Try to access through the context
+      if (webgpuRenderer._context && webgpuRenderer._context.device) {
+        return webgpuRenderer._context.device;
+      }
+      
+      // Try to access through parameters
+      if (webgpuRenderer.parameters && webgpuRenderer.parameters.device) {
+        return webgpuRenderer.parameters.device;
+      }
+      
+      // As a last resort, check if we stored it during creation
+      if (this.gpuDevice) {
+        return this.gpuDevice;
+      }
+      
+      console.warn('Could not find WebGPU device in renderer structure');
+    }
+    return null;
   }
 
   private async loadVonGridScript(): Promise<boolean> {
@@ -195,6 +229,21 @@ export class MazeSceneManager {
     
     console.log('WebGPU supported, setting up renderer');
     
+    // Create our own WebGPU device first
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        console.error('No WebGPU adapter available');
+        return false;
+      }
+      
+      this.gpuDevice = await adapter.requestDevice();
+      console.log('Created WebGPU device:', this.gpuDevice);
+    } catch (error) {
+      console.error('Failed to create WebGPU device:', error);
+      return false;
+    }
+    
     const sceneConfig = {
       element: container,
       alpha: true,
@@ -207,7 +256,8 @@ export class MazeSceneManager {
       width: container.clientWidth,
       height: container.clientHeight,
       enableShadows: true,
-      preferWebGPU: true // Force WebGPU
+      preferWebGPU: true, // Force WebGPU
+      device: this.gpuDevice // Pass our device to the renderer
     };
     
     try {
@@ -345,6 +395,28 @@ export class MazeSceneManager {
     }
     
     this.animationQueue = this.vonGridService.createLinkedList();
+  }
+  /**
+   * Create / recreate board tiles using the current board and bronze material.
+   * The bevel values scale automatically with the supplied cellSize.
+   */
+  private async generateTiles(cellSize: number): Promise<void> {
+    if (!this.board) return;
+
+    const extrudeSettings = {
+      depth: 1,
+      bevelEnabled: true,
+      bevelSegments: 3,
+      steps: 2,
+      bevelSize: cellSize / 15,
+      bevelThickness: cellSize / 15
+    };
+
+    await this.board.generateTilemap({
+      tileScale: 0.95,
+      material: this.bronzeMaterial,
+      extrudeSettings
+    });
   }
 
   /**
@@ -592,21 +664,8 @@ export class MazeSceneManager {
     }
     
     // Generate tiles with enhanced settings for path tracing
-    const extrudeSettings = {
-      depth: 1,
-      bevelEnabled: true,
-      bevelSegments: 3,      // More segments for smoother bevels
-      steps: 2,              // More steps for smoother extrusions
-      bevelSize: cellSize / 15,  // Slightly more pronounced bevel
-      bevelThickness: cellSize / 15
-    };
-    
-    this.board.generateTilemap({
-      tileScale: 0.95,
-      material: this.bronzeMaterial,
-      extrudeSettings
-    });
-    
+    await this.generateTiles(cellSize);
+
     if (this.board.tiles) {
       this.board.tiles.forEach((tile: any) => {
         if (tile.mesh) {
@@ -624,6 +683,9 @@ export class MazeSceneManager {
               tile.mesh.userData['enhancedForPathTracing'] = true;
             }
           }
+          
+          // CRITICAL: Add tiles to the sceneGroups.tiles for path tracer access
+          this.sceneGroups.tiles.add(tile.mesh);
         }
       });
     }
@@ -643,6 +705,8 @@ export class MazeSceneManager {
     
     await this.prepareIntroAnimation();
   }
+
+
 
   /**
    * Animate solution paths through the maze
@@ -690,18 +754,7 @@ export class MazeSceneManager {
       }
     });
     
-    // Update the path traced scene after all paths are processed
-    setTimeout(() => {
-      if (this.pathTracer) {
-        this.pathTracer.buildSceneFromMaze({
-          tiles: this.sceneGroups.tiles.children as THREE.Mesh[],
-          walls: this.sceneGroups.walls.children as THREE.Mesh[],
-          center: new THREE.Vector3(),
-          size: 100,
-          floorY: 0
-        });
-      }
-    }, 500);
+    // Scene already built in createMaze() - no need to rebuild
   }
 
   /**
@@ -977,17 +1030,10 @@ export class MazeSceneManager {
       () => this.finishIntroAnimation()
     );
     
-    // Update scene in the path tracer
+    // Scene already built in createMaze() - just reset quality and rendering
     if (this.pathTracer) {
       this.pathTracer.setQuality('high');
       this.pathTracer.resetRendering();
-      this.pathTracer.buildSceneFromMaze({
-        tiles: this.sceneGroups.tiles.children as THREE.Mesh[],
-        walls: this.sceneGroups.walls.children as THREE.Mesh[],
-        center: new THREE.Vector3(),
-        size: 100,
-        floorY: 0
-      });
     }
   }
 
@@ -1008,13 +1054,7 @@ export class MazeSceneManager {
     if (this.pathTracer) {
       this.pathTracer.setQuality('high');
       this.pathTracer.resetRendering();
-      this.pathTracer.buildSceneFromMaze({
-        tiles: this.sceneGroups.tiles.children as THREE.Mesh[],
-        walls: this.sceneGroups.walls.children as THREE.Mesh[],
-        center: new THREE.Vector3(),
-        size: 100,
-        floorY: 0
-      });
+      // Scene already built in createMaze() - no need to rebuild
     }
     
     if (this.animationQueue && this.animationQueue.length > 0 && this.pathAnimator) {
@@ -1061,15 +1101,7 @@ export class MazeSceneManager {
     
     await Promise.all(validationPromises);
     
-    if (this.pathTracer) {
-      this.pathTracer.buildSceneFromMaze({
-        tiles: this.sceneGroups.tiles.children as THREE.Mesh[],
-        walls: this.sceneGroups.walls.children as THREE.Mesh[],
-        center: new THREE.Vector3(),
-        size: 100,
-        floorY: 0
-      });
-    }
+    // Scene already built in createMaze() - no need to rebuild for component validation
   }
 
   /**
@@ -1118,17 +1150,7 @@ export class MazeSceneManager {
       }
     });
     
-    // Update path tracer with new walls
-    if (this.pathTracer) {
-      this.pathTracer.resetRendering();
-      this.pathTracer.buildSceneFromMaze({
-        tiles: this.sceneGroups.tiles.children as THREE.Mesh[],
-        walls: this.sceneGroups.walls.children as THREE.Mesh[],
-        center: new THREE.Vector3(),
-        size: 100,
-        floorY: 0
-      });
-    }
+    // Walls are built as part of createMaze() - scene will be built there
   }
 
   /**

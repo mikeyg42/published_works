@@ -46,7 +46,8 @@ import { ModalComponent } from './modal/modal.component';
 import { HexMazeComponent } from './hex-maze/components/hex-maze.component';
 import { Meta, Title } from '@angular/platform-browser';
 import ApplyLineTextHoverAnimation from './animations/animation.lineTextHoverEffect';
-import { VonGridService } from './hex-maze/services/von-grid.service';
+import { PathTracerService } from './hex-maze/services/pathTracing_webgpu.service';
+import { MatSnackBar } from '@angular/material/snack-bar';
 
 
 @Component({
@@ -366,7 +367,9 @@ export class AppComponent implements OnInit, OnDestroy, AfterViewInit {
     @Inject(PLATFORM_ID) private platformId: Object,
     private sanitizer: DomSanitizer,
     private meta: Meta,
-    private titleService: Title
+    private titleService: Title,
+    public pathTracerService: PathTracerService,
+    private snackBar: MatSnackBar
   ) {
     this.titleService.setTitle(this.pageTitle);
     this.meta.addTags([
@@ -383,6 +386,12 @@ export class AppComponent implements OnInit, OnDestroy, AfterViewInit {
     if (isPlatformBrowser(this.platformId)) {
       this.getCSSVariables();
       this.adjustGrid();
+    }
+     if (this.pathTracerService.errorMessage) {
+      this.snackBar.open(this.pathTracerService.errorMessage, 'Dismiss', {
+        duration: 10000,
+        panelClass: ['webgpu-snackbar']
+      });
     }
   
   }
@@ -495,7 +504,7 @@ export class AppComponent implements OnInit, OnDestroy, AfterViewInit {
   }
 
   resetContainerSizes(): void {
-    if (isPlatformBrowser(this.platformId)) {
+    if (isPlatformBrowser(this.platformId) && this.cards) {
       // Unlock the container sizes
       this.cards.forEach((containerRef) => {
         const container = containerRef.nativeElement as HTMLElement;
@@ -506,9 +515,11 @@ export class AppComponent implements OnInit, OnDestroy, AfterViewInit {
   
       // Re-lock the sizes after content has adjusted
       setTimeout(() => {
-        this.cards.forEach((containerRef) => {
-          this.lockContainerSize(containerRef);
-        });
+        if (this.cards) {
+          this.cards.forEach((containerRef) => {
+            this.lockContainerSize(containerRef);
+          });
+        }
       }, 0);
     }
   }

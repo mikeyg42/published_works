@@ -2,6 +2,9 @@
 
 /// <reference types="three" />
 import * as TweenJS from '@tweenjs/tween.js';
+// Attempt to import the type
+import WebGPURenderer from 'three/src/renderers/webgpu/WebGPURenderer.js';
+
 
 declare global {
   interface Window {
@@ -37,8 +40,8 @@ export interface VG {
 
   // Loader for asynchronous texture loading
   Loader: {
-    renderer?: THREE.WebGLRenderer | THREE.WebGPURenderer;
-    init(crossOrigin?: boolean, renderer?: THREE.WebGLRenderer | THREE.WebGPURenderer): void;
+    renderer?: THREE.WebGLRenderer | WebGPURenderer;
+    init(crossOrigin?: boolean, renderer?: THREE.WebGLRenderer | WebGPURenderer): void;
     loadTexture(
       url: string,
       mapping: THREE.Mapping,
@@ -51,7 +54,7 @@ export interface VG {
 // The following interfaces represent the instance side of your classes:
 
 export interface VGScene {
-  renderer: THREE.WebGLRenderer | THREE.WebGPURenderer;
+  renderer: THREE.WebGLRenderer | WebGPURenderer;
   usingWebGPU: boolean;
   width: number;
   height: number;
