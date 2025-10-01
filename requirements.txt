@@ -1,0 +1,9 @@
+fastapi>=0.115
+uvicorn[standard]>=0.18
+redis>=6.0
+websockets>=10
+networkx>=3.0
+numpy>=1.23
+matplotlib>=3.5
+ortools>=9.0
+google-cloud-storage>=2.0

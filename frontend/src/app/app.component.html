@@ -1,0 +1,269 @@
+<!-- src/app/app.component.html -->
+<div class="background-container">
+  <app-hex-maze></app-hex-maze>
+</div>
+
+<!--shouldn't the canvas for the hex maze be here?-->
+
+<div class="content-wrapper">
+  <!-- Mobile-friendly header section -->
+  <header class="profile-header">
+    <img
+      [src]="profileImageUrl || 'https://storage.googleapis.com/resume_page/content/MichaelHeadshot2.jpg'"
+      alt="Michael Glendinning"
+      class="profile-image"
+      (click)="openModal(profileImageUrl || 'https://storage.googleapis.com/resume_page/content/MichaelHeadshot2.jpg', false, 270, 270)"
+      loading="lazy"
+    />
+    <!-- Add the 'line-hover' class here for the name text -->
+    <h1 class="name-title line-hover">{{ title || 'Michael Glendinning' }}</h1>
+  </header>
+
+  <!-- Action buttons -->
+  <div class="action-buttons">
+    <a
+      [href]="resumeUrl"
+      download
+      class="action-btn resume-btn"
+      data-tooltip="Download Resume"
+    >
+      <i class="bi bi-file-earmark-arrow-down"></i> Download Resume
+    </a>
+    <a
+      href="https://github.com/mikeyg42"
+      target="_blank"
+      rel="noopener noreferrer"
+      class="action-btn github-btn"
+      data-tooltip="Visit my GitHub"
+    >
+      <i class="bi bi-github"></i> GitHub
+    </a>
+    <a
+      href="https://linkedin.com/in/mikeyg42"
+      target="_blank"
+      rel="noopener noreferrer"
+      class="action-btn linkedin-btn"
+      data-tooltip="Visit my LinkedIn"
+    >
+      <i class="bi bi-linkedin"></i> LinkedIn
+    </a>
+  </div>
+
+  <!-- Expandable bio section -->
+  <div class="bio-section" [class.expanded]="isBioExpanded">
+    <!-- A short preview or snippet from your bio -->
+    <div class="bio-preview" (click)="toggleBio()">
+      <p>{{ bioPreview }}</p>
+      <span class="expand-indicator">
+        {{ isBioExpanded ? 'Show Less' : 'Read More' }}
+        <i
+          class="bi"
+          [ngClass]="isBioExpanded ? 'bi-chevron-up' : 'bi-chevron-down'"
+        ></i>
+      </span>
+    </div>
+
+    <!-- Full bio, revealed when isBioExpanded is true -->
+    <div class="bio-full" *ngIf="isBioExpanded">
+      <!-- This uses innerHTML to display the full bio safely (per your original code) -->
+      <div [innerHTML]="bioText"></div>
+    </div>
+  </div>
+
+  <!-- Articles Section -->
+  <section class="articles-section">
+    <!-- Added 'line-hover' class here for the Articles subheader -->
+    <h2 class="sub-section-title line-hover">Articles</h2>
+
+    <!-- Example grid layout for publications -->
+    <div class="publications-grid">
+      <div *ngFor="let pub of articles" 
+           class="publication-panel"
+           [class.active]="pub.isActive"
+           [class.expanded]="pub.isExpanded">
+        
+        <div class="panel-content">
+          <!-- Left side (anchored) -->
+          <div class="panel-basic-info">
+            <h3 class="title">{{ pub.title }}</h3>
+            <div class="journal-info">
+              <span class="journal">{{ pub.journal }}</span>
+              <span class="year">({{ pub.year }})</span>
+            </div>
+            <div class="authors">{{ pub.authors }}</div>
+          </div>
+
+          <!-- Right side (sliding) -->
+          <div class="panel-extended-content">
+            <div class="publication-images">
+              <img *ngIf="pub.imageSrc" 
+                   [src]="pub.imageSrc" 
+                   [alt]="pub.title"
+                   (click)="openModal(pub.imageSrc, false, pub.width1, pub.height1)">
+              <img *ngIf="pub.imageSrc2" 
+                   [src]="pub.imageSrc2" 
+                   [alt]="pub.title"
+                   (click)="openModal(pub.imageSrc2, false, pub.width2, pub.height2)">
+            </div>
+            <button class="expand-btn" 
+                    (click)="togglePanelExpanded(pub, $event)">
+              {{ pub.isExpanded ? 'Show Less' : 'Show Abstract' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Abstract (expands downward) -->
+        <div class="panel-abstract" *ngIf="pub.isExpanded">
+          <p>{{ pub.abstract }}</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Abstracts Section -->
+  <section class="abstracts-section">
+    <!-- Added 'line-hover' class here for the Abstracts subheader -->
+    <h2 class="sub-section-title line-hover">Abstracts</h2>
+
+    <div
+      class="publications-grid"
+      [ngStyle]="{
+        'grid-template-columns': gridTemplateColumns,
+        gap: gridGap + 'px',
+        padding: outerPadding + 'px'
+      }"
+    >
+      <div
+        *ngFor="let publication of abstracts; trackBy: trackByFn"
+        class="publication-card"
+        [class.expanded]="publication.id === expandedPublicationId"
+      >
+        <!-- Publication Details -->
+        <h4 class="publication-title">{{ publication.title }}</h4>
+        <p class="meeting-year">
+          <em>{{ publication.meeting }}</em>
+          <span class="year"> ({{ publication.year }})</span>
+        </p>
+
+        <!-- Media (images, video) -->
+        <div class="media-container">
+          <img
+            *ngIf="publication.imageSrc"
+            [ngSrc]="publication.imageSrc"
+            class="pub-image"
+            loading="lazy"
+            [priority]="false"
+            [width]="publication.width1"
+            [height]="publication.height1"
+            (click)="openModal(publication.imageSrc, false, publication.width1, publication.height1)"
+            data-tooltip="View Image"
+            alt="Image for {{ publication.title }}"
+          />
+          <img
+            *ngIf="publication.imageSrc2"
+            [ngSrc]="publication.imageSrc2"
+            class="pub-image"
+            loading="lazy"
+            [priority]="false"
+            [width]="publication.width2"
+            [height]="publication.height2"
+            (click)="openModal(publication.imageSrc2, false, publication.width2, publication.height2)"
+            data-tooltip="View Image 2"
+            alt="Additional image for {{ publication.title }}"
+          />
+          <video
+            *ngIf="publication.videoSrc"
+            class="pub-video"
+            autoplay
+            loop
+            muted
+            playsinline
+            (click)="openModal(publication.videoSrc, true)"
+            [attr.aria-label]="publication.title"
+          >
+            <source [src]="publication.videoSrc" type="video/mp4" />
+            Your browser does not support the video tag.
+          </video>
+        </div>
+
+        <!-- Toggle Abstract Button -->
+        <button
+          class="toggle-abstract"
+          (click)="toggleAbstract(publication.id)"
+          [attr.aria-expanded]="publication.id === expandedPublicationId"
+        >
+          {{ publication.id === expandedPublicationId ? 'Hide Details' : 'Show Details' }}
+          <i
+            class="bi"
+            [ngClass]="
+              publication.id === expandedPublicationId
+                ? 'bi-chevron-up'
+                : 'bi-chevron-down'
+            "
+          ></i>
+        </button>
+
+        <!-- Abstract Content -->
+        <div
+          *ngIf="publication.id === expandedPublicationId"
+          class="abstract-content show"
+        >
+          <p class="authors">
+            <strong class="authors-label">Authors: </strong>
+            <!-- boldName pipe from your original code -->
+            <span [innerHTML]="publication.authors | boldName"></span>
+          </p>
+          <p class="abstract">
+            <strong class="abstract-label">Abstract: </strong>
+            <span
+              class="publication-abstract"
+              [innerHTML]="publication.abstract"
+            ></span>
+          </p>
+        </div>
+
+        <!-- Links -->
+        <div class="publication-links">
+          <a
+            [href]="publication.journalLink"
+            target="_blank"
+            rel="noopener noreferrer"
+            *ngIf="publication.journalLink"
+            class="journal-link"
+            data-tooltip="View the journal article"
+          >
+            View Journal
+          </a>
+          <a
+            [href]="publication.directDownload"
+            target="_blank"
+            rel="noopener noreferrer"
+            *ngIf="publication.directDownload"
+            class="download-btn"
+            data-tooltip="Download the PDF"
+          >
+            <i class="bi bi-cloud-download"></i> Download PDF
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Modal (unchanged from your original code) -->
+  <app-modal
+    *ngIf="isModalOpen"
+    [src]="modalSrc"
+    [isVideo]="isVideoModal"
+    [imageWidth]="modalImageWidth"
+    [imageHeight]="modalImageHeight"
+    (modalClosed)="closeModal()"
+    (zoomChanged)="handleZoomChange($event)"
+  ></app-modal>
+</div>
+
+<!-- Footer -->
+<footer>
+  <div class="footer-content">
+    <p>© 2024 Michael Glendinning. All rights reserved.</p>
+  </div>
+</footer>

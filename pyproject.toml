@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maze_solver_app"
+version = "0.1.0"
+description = "Maze solver application"
+requires-python = ">=3.12.10"
+dependencies = [
+    "fastapi",
+    "numpy",
+    "redis",
+    "uvicorn[standard]",
+    "websockets",
+    "networkx",
+    "matplotlib",
+    "rust_maze_solver",
+    "ortools",
+    "google-cloud-storage>=2.0.0"
+]
+
+[tool.setuptools]
+packages = ["backend"]

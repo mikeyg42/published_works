@@ -1,0 +1,383 @@
+/* ==============================
+   1) Imports
+   ============================== */
+
+/* ==============================
+   2) Variable Unification
+   Combining snippet variables & original variables
+   ============================== */
+:root {
+  /* --- From snippet --- */
+  --background-color: #121212;
+  --text-color: #ffffff;
+  --accent-color: #bb86fc;
+  --surface-color: #1e1e1e;
+  --card-color: #2d2d2d;
+
+  /* --- Original or mapped equivalents --- */
+  --text-dark: #ffffff; /* mapped to snippet's white text color */
+  --text-light: #ffffff; /* also mapped to white (if you prefer lighten/darken) */
+  --accent: #bb86fc;     /* matches snippet accent */
+  --background-dark: #121212; /* matches snippet background */
+  --bio-box-background: #1e1e1e; /* matches snippet's surface color */
+  --card-hover: #383838;        /* slightly lighter hover on dark backgrounds */
+  --text-color-accent: #bb86fc; /* pointer to accent color for text, if needed */
+  --button-background-color: #bb86fc; /* fallback usage */
+  --button-hover-color: #d8afff;      /* lighten for hover effect */
+  --footer-height: 60px;
+  --grid-gap: 10px;
+  --outer-padding: 10px;
+  /* Adjust or remove any leftover "sidebar" widths if not needed: */
+  --sidebar-width: 300px;
+  --sidebar-min-width: 200px;
+  /* Use breakpoints from snippet or your own: */
+  --breakpoint: 992px;
+  --just-below-breakpoint: 991px;
+}
+
+/* ==============================
+   3) Base / Reset
+   ============================== */
+*, *::before, *::after {
+  box-sizing: border-box;
+  /* Removed forced overflow-x hidden to allow normal horizontal scrolling if needed */
+}
+
+body {
+  background-color: var(--background-color);
+  color: var(--text-color);
+  margin: 0;
+  padding: 0;
+  font-family: 'Roboto', sans-serif; /* from snippet */
+  line-height: 1.25; /* or your preference */
+  overflow-y: auto; /* ensure vertical scroll is allowed */
+}
+
+/* ==============================
+   4) Hex Maze / Background Layout
+   ============================== */
+.ap-hex-maze {
+  z-index: 3000;
+}
+
+.hero-container {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+}
+
+app-hex-maze {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.background-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 1;
+}
+
+/* ==============================
+   5) Content Wrapper
+   ============================== */
+.content-wrapper {
+  position: relative;
+  z-index: 1;
+  padding: 20px;
+  width: 100%;
+  max-width: 1900px; /* or your preferred max-width */
+  margin: 0 auto;
+  min-height: 100vh; /* ensure the wrapper covers full viewport */
+  display: flex;     /* let content stack with gap */
+  flex-direction: column;
+  gap: 2rem;
+}
+/* ==============================
+   6) Profile Header (from snippet)
+   ============================== */
+.profile-header {
+  margin-top: 2rem;
+  text-align: center;
+  
+  .profile-image {
+    width: 180px;
+    height: 180px;
+    border-radius: 50%;
+    border: 3px solid var(--accent-color);
+    box-shadow: 0 0 15px rgba(187, 134, 252, 0.3);
+  }
+
+  .name-title {
+    margin-top: 1rem;
+    font-size: 2.5rem;
+    color: var(--text-color);
+    font-family: 'Rampart One', sans-serif;
+  }
+}
+
+/* ==============================
+   7) Action Buttons (from snippet)
+   ============================== */
+.action-buttons {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  gap: 1rem;
+  margin: 1rem 0;
+  flex-wrap: wrap;
+  padding: 0 1rem;
+
+  .action-btn {
+    min-width: 160px;
+    padding: 0.8rem 1.5rem;
+    border-radius: 8px;
+    text-decoration: none;
+    font-weight: 500;
+    transition: all 0.3s ease;
+    text-align: center;
+    
+    &:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+    }
+  }
+
+  .resume-btn {
+    background-color: var(--accent-color);
+    color: var(--background-color);
+  }
+
+  .github-btn {
+    background-color: #333;
+    /* color stays white or var(--text-color) */
+  }
+
+  .linkedin-btn {
+    background-color: #0077b5;
+    /* color stays white or var(--text-color) */
+  }
+}
+
+/* ==============================
+   8) Expandable Bio Section (from snippet)
+   ============================== */
+.bio-section {
+  background-color: var(--surface-color);
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 2rem 0;
+
+  .bio-preview {
+    cursor: pointer;
+  }
+
+  .expand-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent-color);
+    gap: 0.5rem;
+  }
+
+  /* Show/hide logic typically done in component TS, but you can add transitions here if desired */
+  &.expanded {
+    .bio-full {
+      display: block;
+    }
+  }
+}
+
+/* ==============================
+   9) Publications Layout
+   ============================== */
+.publications-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  width: 100%;
+  padding: 0.5rem;
+  align-items: flex-start;
+}
+
+.publication-panel {
+  background: rgba(30, 30, 30, 0.8);
+  backdrop-filter: blur(5px);
+  border-radius: 8px;
+  width: 155%;
+  min-height: 120px;
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+  cursor: pointer;
+  transform-origin: left center;
+  margin-left: 2rem;
+  
+  &:hover {
+    width: 105%;
+    background: rgba(40, 40, 40, 0.95);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    z-index: 1;
+    transform-origin: left center;
+
+    .panel-extended-content {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+
+  .panel-content {
+    display: flex;
+    padding: 1.5rem;
+    gap: 2rem;
+    width: 100%;
+  }
+
+  .panel-basic-info {
+    flex: 1;
+    padding-right: 1rem;
+    width: 90%;
+
+    .title {
+      font-size: 2.8rem;
+      line-height: 1.5;
+      margin-bottom: 1rem;
+      word-wrap: normal;
+      color: var(--accent-color);
+      width: 100%;
+    }
+
+    .authors {
+      font-size: 1.1rem;
+      line-height: 1.4;
+      word-wrap: normal;
+      color: var(--text-light);
+      width: 100%;
+    }
+  }
+
+  .panel-extended-content {
+    flex: 0 0 auto;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    opacity: 0;
+    transform: translateX(-50px);
+    transition: all 0.5s ease;
+  }
+
+  .publication-images {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    
+    img {
+      height: 180px;
+      width: auto;
+      border-radius: 4px;
+      transition: all 0.5s ease;
+      object-fit: contain;
+
+      &:hover {
+        height: 180px;
+        transform: scale(1.00);
+      }
+    }
+  }
+}
+
+// Additional styles for the abstracts section
+.abstracts-section {
+  .publication-card {
+    .publication-images {
+      img {
+        max-height: 180px; // Limit maximum height for abstract images
+        width: auto;
+      }
+    }
+  }
+}
+
+/* ==============================
+   11) Section Headings, Titles, Etc.
+   ============================== */
+h1, h2, h3, h4 {
+  color: var(--text-dark);
+}
+
+.articles-section h2,
+.abstracts-section h2 {
+  font-family: Rampart One, sans-serif;
+  margin: 10px;
+  padding-bottom: 1.5rem;
+  position: relative;
+  color: var(--text-dark);
+  text-shadow:
+    1px 1px 6px white,
+    -1px -1px 9px white,
+    0 1px 40px #FAF9F6;
+  filter: drop-shadow(0 0 12px white) drop-shadow(0 0 30px rgb(122 233 255 / 70%));
+}
+
+/* ==============================
+   12) Footer
+   ============================== */
+footer {
+  position: fixed;
+  bottom: 0;
+  width: 100%;
+  box-sizing: border-box;
+
+  .footer-content p {
+    font-family: Audiowide, serif;
+    padding: 40px 0;
+    margin: 0;
+    color: var(--text-light);
+    background-color: var(--background-dark);
+    text-align: center;
+    font-size: 1.6rem;
+    height: var(--footer-height);
+  }
+}
+
+/* ==============================
+   13) Responsive Adjustments
+   ============================== */
+/* "Mobile first": declare your default styles above,
+   then override them in min-width queries if needed.
+   We leave some old small-screen changes if relevant. */
+
+/* For screens smaller than 768px */
+@media (max-width: 767.98px) {
+  .panel-content {
+    grid-template-columns: 1fr;
+  }
+  .panel-basic-info {
+    .title {
+      font-size: 13px;
+    }
+    .journal-info {
+      font-size: 11px;
+    }
+  }
+  .panel-extended-content {
+    &:hover {
+      transform: none; /* Disable hover transform on mobile */
+    }
+  }
+}
+
+@media (max-width: 479.98px) {
+  .panel-basic-info {
+    .title {
+      font-size: 12px;
+    }
+  }
+}
+

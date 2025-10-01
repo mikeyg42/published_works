@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./out-tsc/app",
+    "types": ["node"]
+  },
+  "include": [
+    "src/main.ts",
+    "src/**/*.prod.ts",
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/**/*.wgsl",
+    "ssl/server.crt",
+    "ssl/server.key",
+    
+  ]
+}

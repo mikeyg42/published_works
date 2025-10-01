@@ -1,0 +1,4 @@
+name: resume-page-allow-invalid-client-cert
+mtlsPolicy:
+  clientValidationMode: ALLOW_INVALID_OR_MISSING_CLIENT_CERT
+  clientValidationTrustConfig: projects/resume-page-430800/locations/global/trustConfigs/maze-solver-trust-config

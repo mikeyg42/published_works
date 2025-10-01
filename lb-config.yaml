@@ -1,0 +1,20 @@
+creationTimestamp: '2024-10-31T06:57:09.189-07:00'
+defaultCustomErrorResponsePolicy:
+  errorService: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/backendBuckets/resume_page
+defaultService: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/backendBuckets/resume_page
+fingerprint: tfWnsV-VbwE=
+hostRules:
+- hosts:
+  - michaelglendinning.com
+  pathMatcher: api-paths
+id: 5495042429323981402
+kind: compute#urlMap
+name: resume1
+pathMatchers:
+- defaultService: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/backendBuckets/resume_page
+  name: api-paths
+  pathRules:
+  - paths:
+    - /api/*
+    service: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/backendServices/maze-api-backend
+selfLink: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/urlMaps/resume1

@@ -1,0 +1,12 @@
+creationTimestamp: '2024-10-31T06:57:13.478-07:00'
+fingerprint: GBXgArHZ3p0=
+id: 5009431848922526294
+kind: compute#targetHttpsProxy
+name: resume1-target-proxy
+quicOverride: NONE
+selfLink: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/targetHttpsProxies/resume1-target-proxy
+sslCertificates:
+- https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/sslCertificates/michaelglendinning-cert
+sslPolicy: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/sslPolicies/modern-tls-policy
+tlsEarlyData: DISABLED
+urlMap: https://www.googleapis.com/compute/v1/projects/resume-page-430800/global/urlMaps/resume1

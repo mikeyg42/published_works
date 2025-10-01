@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Error <span id="error-code">Error</span></title>
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+Bhaina&family=Poppins:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box;}
+    body {
+      position:relative;
+      height:100vh;
+      background: linear-gradient(135deg, #f5f7fa, #c3cfe2);
+      font-family: 'Poppins', sans-serif;
+      color:#333;
+      overflow:hidden;
+    }
+    /* Hexagon grid overlay */
+    .hex-bg {
+      position:absolute;
+      top:0; left:0; width:100%; height:100%;
+      z-index:0;
+      background-image:
+        linear-gradient(30deg, rgba(255,255,255,0.2) 12%, transparent 12.5%, transparent 87%, rgba(255,255,255,0.2) 87.5%, rgba(255,255,255,0.2)),
+        linear-gradient(150deg, rgba(255,255,255,0.2) 12%, transparent 12.5%, transparent 87%, rgba(255,255,255,0.2) 87.5%, rgba(255,255,255,0.2)),
+        linear-gradient(30deg, rgba(255,255,255,0.2) 12%, transparent 12.5%, transparent 87%, rgba(255,255,255,0.2) 87.5%, rgba(255,255,255,0.2)),
+        linear-gradient(150deg, rgba(255,255,255,0.2) 12%, transparent 12.5%, transparent 87%, rgba(255,255,255,0.2) 87.5%, rgba(255,255,255,0.2));
+      background-size: 40px 70px;
+      background-position: 0 0, 0 0, 20px 35px, 20px 35px;
+      pointer-events:none;
+    }
+    .container {
+      position:relative;
+      z-index:1;
+      text-align:center;
+      background: rgba(255,255,255,0.85);
+      padding:2rem 3rem;
+      border-radius:16px;
+      box-shadow:0 8px 24px rgba(0,0,0,0.1);
+      max-width: 90%;
+      margin: auto;
+    }
+    h1 {
+      font-family:'Baloo Bhaina', cursive;
+      font-size:5rem;
+      color:#ff6f61;
+      animation: bounce 2s ease infinite;
+    }
+    h2 {
+      font-size:1.5rem;
+      margin-top:0.5rem;
+    }
+    p {
+      margin:1.5rem 0;
+      font-size:1rem;
+    }
+    a {
+      display:inline-block;
+      text-decoration:none;
+      font-weight:600;
+      padding:0.75rem 1.5rem;
+      border-radius:8px;
+      border:2px solid #ff6f61;
+      color:#ff6f61;
+      transition: background 0.3s, color 0.3s;
+    }
+    a:hover {
+      background:#ff6f61;
+      color:#fff;
+    }
+    @keyframes bounce {
+      0%,100%{ transform: translateY(0); }
+      50%{ transform: translateY(-20px); }
+    }
+    .emoji {
+      font-size:3rem;
+      display:block;
+      margin-bottom:1rem;
+      animation: float 3s ease-in-out infinite;
+    }
+    @keyframes float {
+      0%,100%{ transform: translateY(0); }
+      50%{ transform: translateY(-10px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="hex-bg"></div>
+  <div class="container">
+    <div class="emoji" id="emoji">🤖</div>
+    <h1 id="title">Oops!</h1>
+    <h2><span id="error-code">Error</span> - <span id="error-message">Something went wrong</span></h2>
+    <p id="description">Let's get you back on track.</p>
+    <a href="/">Go Home</a>
+  </div>
+  <script>
+    (function(){
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get('code') || 'Error';
+      const codeNum = parseInt(code,10);
+      const is4xx = codeNum >=400 && codeNum <500;
+      const is5xx = codeNum >=500 && codeNum <600;
+      const messages = {
+        '404': 'Page not found',
+        '400': 'Bad request',
+        '403': 'Forbidden',
+        '500': 'Server hiccup',
+        '502': 'Bad gateway',
+        '503': 'Service unavailable'
+      };
+      const descriptions = {
+        '4xx': "Looks like you're a bit off course.",
+        '5xx': "Our server is feeling under the weather."
+      };
+      const emojis = {
+        '4xx': '🗺️',
+        '5xx': '🤒'
+      };
+      document.getElementById('error-code').textContent = code;
+      document.getElementById('error-message').textContent = messages[code] || (is4xx ? 'Client error' : is5xx ? 'Server error' : 'Error');
+      document.getElementById('description').textContent = is4xx ? descriptions['4xx'] : is5xx ? descriptions['5xx'] : "Let's get you back on track.";
+      document.getElementById('emoji').textContent = is4xx ? emojis['4xx'] : is5xx ? emojis['5xx'] : '🤖';
+    })();
+  </script>
+</body>
+</html>
