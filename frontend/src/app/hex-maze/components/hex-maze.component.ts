@@ -185,11 +185,14 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
       // Short delay to allow the maze to be drawn (if needed)
       await new Promise(resolve => setTimeout(resolve, 400));
 
-      // Start both operations in parallel and wait for them to finish
-      await Promise.all([
-        this.mazeAnimator.createMaze(this.pathMap), // Render the 3D maze
-        this.solveMaze()                             // Solve the maze
-      ]);
+      // CRITICAL FIX: Create maze FIRST, then solve - avoid race condition
+      console.log('🏗️ Step 1: Building 3D maze geometry...');
+      await this.mazeAnimator.createMaze(this.pathMap); // Build the 3D maze first
+      console.log('✅ Step 1 complete: 3D maze geometry built');
+
+      console.log('🧩 Step 2: Solving maze...');
+      await this.solveMaze(); // Then solve the maze
+      console.log('✅ Step 2 complete: Maze solved');
 
       // Now that the maze is drawn and solutions are ready, animate them.
       this.isAnimating = true; // Maybe set this before or after animation starts? Depends on desired UI behavior.

@@ -65,6 +65,10 @@ export class PathTracerService {
   private currentAccumulationTexture: number = 0; // 0 or 1 to track which texture is current
   private computeBindGroups: GPUBindGroup[] = [];
 
+  // CRITICAL FIX: Store bind group layouts as class properties
+  private computeBindGroupLayout: GPUBindGroupLayout | null = null;
+  private renderBindGroupLayout: GPUBindGroupLayout | null = null;
+
   private isInitialized: boolean = false;
   private sceneReady: boolean = false;
   private buildingScene: boolean = false;
@@ -142,6 +146,9 @@ export class PathTracerService {
       format: this.format,
       alphaMode: 'premultiplied'
     });
+
+    // Add device lost and error handling
+    this.setupDeviceErrorHandling();
     
     // Create uniform buffer
     this.uniformBuffer = this.device.createBuffer({
@@ -172,18 +179,53 @@ export class PathTracerService {
       code: this.displayShaderText
     });
 
-    // Create compute pipeline
+    // CRITICAL FIX: Create explicit bind group layouts instead of 'auto'
+    this.computeBindGroupLayout = this.device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: {
+          access: 'write-only',
+          format: 'rgba32float'
+        }},
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: {
+          access: 'write-only',
+          format: 'rgba8unorm'
+        }},
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }
+      ]
+    });
+
+    this.renderBindGroupLayout = this.device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} }
+      ]
+    });
+
+    // Create explicit pipeline layouts
+    const computePipelineLayout = this.device.createPipelineLayout({
+      bindGroupLayouts: [this.computeBindGroupLayout]
+    });
+    const renderPipelineLayout = this.device.createPipelineLayout({
+      bindGroupLayouts: [this.renderBindGroupLayout]
+    });
+
+    // Create compute pipeline with explicit layout
     this.computePipeline = await this.device.createComputePipelineAsync({
-      layout: 'auto',
+      layout: computePipelineLayout,
       compute: {
         module: computeShaderModule,
         entryPoint: 'main'
       }
     });
-    
-    // Create render pipeline with the correct format
+    console.log('✅ Compute pipeline created with explicit layout');
+
+    // Create render pipeline with explicit layout
     this.renderPipeline = await this.device.createRenderPipelineAsync({
-      layout: 'auto',
+      layout: renderPipelineLayout,
       vertex: {
         module: renderShaderModule,
         entryPoint: 'vertexMain',
@@ -397,8 +439,11 @@ export class PathTracerService {
       minFilter: 'linear'
     });
 
-    // Get the bind group layout from the compute pipeline (created with 'auto' layout)
-    const computeBindGroupLayout = this.computePipeline.getBindGroupLayout(0);
+    // CRITICAL FIX: Use the stored explicit bind group layout
+    if (!this.computeBindGroupLayout) {
+      console.error('❌ Compute bind group layout not initialized');
+      return;
+    }
 
     // Create compute bind group entries for ping-pong textures
     const computeEntries1: GPUBindGroupEntry[] = [
@@ -432,34 +477,40 @@ export class PathTracerService {
       console.log('Added material buffer to bind group');
     }
     
-    // Create compute bind groups using the pipeline's layout
+    // Create compute bind groups using the stored explicit layout
     const computeBindGroup1 = this.device.createBindGroup({
-      layout: computeBindGroupLayout,
+      layout: this.computeBindGroupLayout,
       entries: computeEntries1
     });
-    
+    console.log('✅ Compute bind group 1 created with explicit layout');
+
     const computeBindGroup2 = this.device.createBindGroup({
-      layout: computeBindGroupLayout,
+      layout: this.computeBindGroupLayout,
       entries: computeEntries2
     });
+    console.log('✅ Compute bind group 2 created with explicit layout');
     
     // Store both bind groups and initialize with the first one
     this.computeBindGroups = [computeBindGroup1, computeBindGroup2];
     this.computeBindGroup = this.computeBindGroups[this.currentAccumulationTexture];
 
     // --- Render Bind Group (Display) ---
-    // Get the bind group layout from the render pipeline
-    const renderBindGroupLayout = this.renderPipeline.getBindGroupLayout(0);
-    
+    // CRITICAL FIX: Use stored explicit render bind group layout
+    if (!this.renderBindGroupLayout) {
+      console.error('❌ Render bind group layout not initialized');
+      return;
+    }
+
     const renderEntries: GPUBindGroupEntry[] = [
       { binding: 0, resource: this.outputTexture.createView() }, // outputTexture
       { binding: 1, resource: sampler }, // textureSampler
     ];
-    
+
     this.renderBindGroup = this.device.createBindGroup({
-      layout: renderBindGroupLayout,
+      layout: this.renderBindGroupLayout,
       entries: renderEntries
     });
+    console.log('✅ Render bind group created with explicit layout');
     
     console.log('Bind groups created successfully.');
   }
@@ -765,13 +816,28 @@ export class PathTracerService {
       // Reset rendering since scene changed
       this.resetRendering();
       
-      // Mark scene as ready for rendering
-      this.sceneReady = true;
-      
-      console.log('Path traced scene built successfully with', triangleOffset / 9, 'triangles.');
+      // CRITICAL FIX: Validate scene before marking ready
+      const triangleCount = triangleOffset / 9;
+      console.log('🔍 Validating scene build...');
+      console.log(`- Triangles processed: ${triangleCount}`);
+      console.log(`- Vertex buffer size: ${this.vertexBuffer?.size || 0} bytes`);
+      console.log(`- Normal buffer size: ${this.normalBuffer?.size || 0} bytes`);
+      console.log(`- Material buffer size: ${this.materialBuffer?.size || 0} bytes`);
 
-      // Now start the render loop
-      this.startRenderLoop();
+      // Only mark as ready if we actually have geometry
+      if (triangleCount > 0 && this.vertexBuffer && this.normalBuffer && this.materialBuffer) {
+        // Mark scene as ready for rendering
+        this.sceneReady = true;
+        console.log('✅ Scene validated and ready for path tracing');
+
+        // Now start the render loop
+        this.startRenderLoop();
+        console.log('🚀 Path tracer render loop started');
+      } else {
+        console.error('❌ Scene validation failed - no geometry or missing buffers');
+        console.error(`Triangle count: ${triangleCount}, Buffers: vertex=${!!this.vertexBuffer}, normal=${!!this.normalBuffer}, material=${!!this.materialBuffer}`);
+        this.sceneReady = false;
+      }
       
     } catch (error) {
       console.error('Error building path traced scene:', error);
@@ -789,10 +855,22 @@ export class PathTracerService {
       console.warn('Cannot create buffer: device is null or data is empty');
       throw new Error('Cannot create buffer: device is null or data is empty');
     }
-    
+
     try {
       // Calculate aligned buffer size (must be a multiple of 4 bytes)
       const alignedSize = Math.ceil(data.byteLength / 4) * 4;
+
+      // NOTE: Buffer validation against device limits was considered but omitted
+      // REASONING:
+      // - Device limits are often theoretical maximums, not practical constraints
+      // - Real-world limits depend on available memory and driver state (dynamic)
+      // - Hard validation could block legitimate large maze scenes that would work fine
+      // - WebGPU will naturally fail gracefully with clear error messages if limits exceeded
+      // - Existing crash prevention (renderErrorCount, etc.) handles GPU failures appropriately
+      // FUTURE CONSIDERATION: If buffer-related crashes occur in production, consider:
+      //   1. Configurable buffer size limits (like existing maxTextureSize: 2048)
+      //   2. Graceful degradation (scene simplification) rather than hard failures
+      //   3. Dynamic memory pressure monitoring instead of static limit validation
       
       // Create the buffer with enough size to hold the data
       const buffer = this.device.createBuffer({
@@ -877,7 +955,12 @@ export class PathTracerService {
       console.warn('Path tracing not initialized yet');
       return;
     }
-    
+
+    if (!this.sceneReady) {
+      console.warn('Cannot start render loop: scene not ready - call buildSceneFromMaze first');
+      return;
+    }
+
     if (this.animationFrameId) {
       console.warn('Render loop already running');
       return;
@@ -959,7 +1042,14 @@ export class PathTracerService {
    */
   render(): void {
     // CRASH PREVENTION: Early exit conditions
+    // CRITICAL DEBUG: Log why render is skipped
     if (!this.sceneReady || this.isDisposed) {
+      if (!this.sceneReady) {
+        console.log('🚫 Render skipped: Scene not ready - path tracer waiting for geometry');
+      }
+      if (this.isDisposed) {
+        console.log('🚫 Render skipped: Path tracer disposed');
+      }
       return;
     }
     
@@ -1074,6 +1164,56 @@ export class PathTracerService {
    * Cleans up all WebGPU resources.
    * CRASH PREVENTION: Ensures proper cleanup to prevent memory leaks
    */
+  /**
+   * Setup device error and lost handling
+   */
+  private setupDeviceErrorHandling(): void {
+    if (!this.device) return;
+
+    // Handle uncaptured WebGPU errors
+    this.device.addEventListener('uncapturederror', (event) => {
+      console.error('🚨 Uncaptured WebGPU error:', event.error);
+      console.error('Error type:', event.error.constructor.name);
+
+      // Attempt graceful recovery based on error type
+      if (event.error.message.includes('device lost') || event.error.message.includes('context lost')) {
+        this.handleDeviceLost();
+      } else {
+        // For other errors, just log and continue
+        console.warn('Continuing operation despite WebGPU error');
+      }
+    });
+
+    // Handle device lost events (if supported)
+    if ('lost' in this.device) {
+      (this.device as any).lost.then((info: any) => {
+        console.error('🚨 WebGPU device lost:', info.reason, info.message);
+        this.handleDeviceLost();
+      });
+    }
+  }
+
+  /**
+   * Handle WebGPU device lost scenarios
+   */
+  private handleDeviceLost(): void {
+    console.log('🔄 Attempting to recover from device lost...');
+
+    // Stop current rendering
+    this.isDisposed = true;
+    if (this.animationFrameId) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+
+    // Clear all GPU resources
+    this.finalizeDispose();
+
+    // Note: In a production app, you might want to reinitialize here
+    // For now, just notify the user that a refresh may be needed
+    console.warn('⚠️ WebGPU device lost - page refresh may be required');
+  }
+
   dispose(): void {
     if (this.isDisposed) {
       return; // Already disposed
@@ -1108,7 +1248,20 @@ export class PathTracerService {
       this.normalBuffer?.destroy();
       this.materialBuffer?.destroy();
       this.uniformBuffer?.destroy();
-      
+
+      // Clear bind group layouts and pipelines
+      // Note: WebGPU doesn't require explicit destruction of layouts/pipelines,
+      // but clearing references helps with garbage collection
+      this.computeBindGroupLayout = null;
+      this.renderBindGroupLayout = null;
+      this.computePipeline = null;
+      this.renderPipeline = null;
+
+      // Clear bind group arrays and references
+      this.computeBindGroups = [];
+      this.computeBindGroup = null;
+      this.renderBindGroup = null;
+
       // Remove canvas
       if (this.canvas && this.canvas.parentNode) {
         this.canvas.parentNode.removeChild(this.canvas);
