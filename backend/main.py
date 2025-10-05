@@ -15,17 +15,92 @@ import logging
 from google.cloud import storage
 from fastapi.responses import RedirectResponse, FileResponse, Response
 from fastapi import HTTPException
-from typing import List, Dict
+from typing import List, Dict, Any
 from pydantic import BaseModel
-from backend.redis_cache.cache import fetch as redis_fetch
+
+# Updated Redis imports
+from redis_cache import get_redis_cache, shutdown_cache
+from redis_cache.rate_limiting import AdaptiveRateLimiter
+from backend.middleware.fastapi_middleware import create_rate_limit_middleware
+import redis.asyncio as redis
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: initialize the maze solver queue
-    await app.state.maze_solver.start_queue_processor()
+    # Startup: initialize services
+    try:
+        # Initialize Redis cache - gracefully handle connection failures
+        from redis_cache.client import _cache_instance, OptimizedRedisCache
+        from redis_cache.config import get_redis_config
+
+        cache = None
+        rate_limiter = None
+
+        try:
+            if _cache_instance is None:
+                config = get_redis_config()
+                cache = OptimizedRedisCache(config)
+                await cache.initialize()
+                # Store in global singleton
+                import redis_cache.client as cache_module
+                cache_module._cache_instance = cache
+            else:
+                cache = _cache_instance
+
+            app.state.cache = cache
+            app.state.rate_limiter = AdaptiveRateLimiter(cache.client)
+            logging.info("✅ Redis cache and rate limiter initialized")
+
+        except Exception as redis_error:
+            logging.warning(f"⚠️ Redis connection failed: {redis_error}")
+            logging.warning("⚠️ App will run without Redis caching - features will degrade gracefully")
+
+            # Create a null cache object for graceful degradation
+            app.state.cache = None
+            app.state.rate_limiter = None
+
+        # Initialize maze solver queue
+        await app.state.maze_solver.start_queue_processor()
+        logging.info("Maze solver queue started")
+
+        # Start background cleanup task for rate limiter (only if Redis is available)
+        async def cleanup_task():
+            while True:
+                try:
+                    if hasattr(app.state, 'rate_limiter') and app.state.rate_limiter is not None:
+                        cleanup_count = await app.state.rate_limiter.cleanup_expired_keys()
+                        if cleanup_count > 0:
+                            logging.info(f"Cleaned up {cleanup_count} expired rate limit keys")
+                except Exception as e:
+                    logging.error(f"Rate limiter cleanup error: {e}")
+                await asyncio.sleep(3600)  # Run every hour
+
+        # Only start cleanup task if we have Redis
+        if app.state.rate_limiter is not None:
+            app.state.cleanup_task = asyncio.create_task(cleanup_task())
+        else:
+            app.state.cleanup_task = None
+
+    except Exception as e:
+        logging.error(f"Failed to initialize services: {e}")
+        raise
+
     yield
-    # Shutdown: properly stop the queue processor
-    await app.state.maze_solver.stop_queue_processor()
+
+    # Shutdown: cleanup services
+    try:
+        if hasattr(app.state, 'cleanup_task'):
+            app.state.cleanup_task.cancel()
+            try:
+                await app.state.cleanup_task
+            except asyncio.CancelledError:
+                pass
+
+        await app.state.maze_solver.stop_queue_processor()
+        await shutdown_cache()
+        logging.info("Services shut down successfully")
+
+    except Exception as e:
+        logging.error(f"Error during shutdown: {e}")
 
 app = FastAPI(lifespan=lifespan, root_path="")
 
@@ -77,6 +152,10 @@ app.add_middleware(
     allowed_hosts=allowed_hosts_config, # Use the conditional list
 )
 
+# Rate limiting middleware - will get rate limiter from app state
+rate_limit_middleware = create_rate_limit_middleware()
+app.add_middleware(rate_limit_middleware)
+
 router = APIRouter()
 
 # Define Pydantic models for request and response bodies for type safety
@@ -90,6 +169,116 @@ class MazeSolveRequest(BaseModel):
 class MazeSolveResponse(BaseModel):
     session_id: str
     data: List[List[str]]
+
+class CacheQueryRequest(BaseModel):
+    target_width: int
+    target_height: int
+    max_results: int = 5
+
+class CacheQueryResponse(BaseModel):
+    cache_hits: List[Dict[str, Any]]
+    count: int
+    message: str
+
+@router.post("/api/cache/query", response_model=CacheQueryResponse)
+async def query_cache(request: CacheQueryRequest):
+    """
+    Query for compatible cached mazes based on canvas dimensions.
+    Returns available cache hits without device exclusion metadata.
+    """
+    try:
+        from redis_cache.maze_cache import create_maze_cache
+        from redis_cache.client import get_redis_cache
+
+        # Create mock request info since we don't need device exclusion for queries
+        request_info = {"ip": "query", "user_agent": "", "accept_language": ""}
+
+        # Find compatible mazes using MazeCache instance
+        async with get_redis_cache() as cache:
+            maze_cache = await create_maze_cache(cache.client)
+            compatible_mazes = await maze_cache.find_compatible_mazes(
+                target_width=request.target_width,
+                target_height=request.target_height,
+            request_info=request_info,
+            max_results=request.max_results
+        )
+
+        # Format response
+        cache_hits = []
+        for maze_data, solutions in compatible_mazes:
+            dimensions = maze_data.get('dimensions', {})
+            cache_hits.append({
+                "rows": dimensions.get('rows', 0),
+                "cols": dimensions.get('cols', 0),
+                "hexWidth": dimensions.get('hexWidth', 0),
+                "hexHeight": dimensions.get('hexHeight', 0),
+                "solution_count": len([sol for sol in solutions if sol]),
+                "resized_for_canvas": f"{request.target_width}x{request.target_height}"
+            })
+
+        return CacheQueryResponse(
+            cache_hits=cache_hits,
+            count=len(cache_hits),
+            message=f"Found {len(cache_hits)} compatible cached maze(s)"
+        )
+
+    except Exception as e:
+        logging.error(f"Cache query error: {e}")
+        raise HTTPException(status_code=500, detail=f"Cache query failed: {str(e)}")
+
+@router.get("/api/cache/stats")
+async def get_cache_stats():
+    """Get comprehensive cache statistics"""
+    try:
+        from redis_cache.maze_cache import create_maze_cache
+        from redis_cache.client import get_redis_cache
+
+        async with get_redis_cache() as cache:
+            maze_cache = await create_maze_cache(cache.client)
+        stats = await maze_cache.get_cache_stats()
+
+        # Add Redis client stats if available
+        if hasattr(app.state, 'cache'):
+            redis_stats = await app.state.cache.get_stats()
+            stats['redis_client'] = redis_stats
+
+        # Add rate limiter stats if available
+        if hasattr(app.state, 'rate_limiter'):
+            rate_limit_stats = await app.state.rate_limiter.get_stats()
+            stats['rate_limiting'] = rate_limit_stats
+
+        return stats
+
+    except Exception as e:
+        logging.error(f"Cache stats error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get cache stats: {str(e)}")
+
+@router.get("/api/cache/cleanup")
+async def cleanup_cache():
+    """Manually trigger cache cleanup (admin endpoint)"""
+    try:
+        from redis_cache.maze_cache import create_maze_cache
+        from redis_cache.client import get_redis_cache
+
+        async with get_redis_cache() as cache:
+            maze_cache = await create_maze_cache(cache.client)
+        cleanup_count = await maze_cache.cleanup_expired_entries()
+
+        # Also cleanup rate limiter if available
+        rl_cleanup_count = 0
+        if hasattr(app.state, 'rate_limiter'):
+            rl_cleanup_count = await app.state.rate_limiter.cleanup_expired_keys()
+
+        return {
+            "status": "success",
+            "maze_cache_cleaned": cleanup_count,
+            "rate_limiter_cleaned": rl_cleanup_count,
+            "message": f"Cleaned up {cleanup_count} maze entries and {rl_cleanup_count} rate limit keys"
+        }
+
+    except Exception as e:
+        logging.error(f"Cache cleanup error: {e}")
+        raise HTTPException(status_code=500, detail=f"Cache cleanup failed: {str(e)}")
 
 @router.get("/api/visualize/{session_id}", response_model=None)
 async def get_visualization(session_id: str) -> Response:
@@ -331,10 +520,11 @@ async def generate_visualization(session_id: str):
     the same structure produced by _generate_component_report_for_rest.
     """
     
-    cached = await redis_fetch(session_id)
-    if not cached:
-        raise HTTPException(status_code=404,detail=f"Session '{session_id}' not in cache (expired or wrong instance)." )
-    data, solutions = cached
+    async with get_redis_cache() as cache:
+        cached = await cache.get_maze_solution(session_id)
+        if not cached:
+            raise HTTPException(status_code=404, detail=f"Session '{session_id}' not in cache (expired or wrong instance).")
+        data, solutions = cached
     try:
         print(f"Triggering visualization generation for session: {session_id}")
         viz_info = await solver._generate_component_report_for_rest(data, solutions)  # type: ignore[arg-type]

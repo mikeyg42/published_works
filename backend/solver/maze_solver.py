@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Union
 import numpy as np
 import importlib.util
-from backend.redis_cache.cache import save as redis_save 
+from redis_cache import cache_maze 
 
 
 GraphLike = Union[nx.Graph, nx.DiGraph, nx.MultiGraph, dict[str, list[str]]]
@@ -607,7 +607,7 @@ class MazeSolver:
             print(f"Final solution lengths: {solution_lengths}")
 
             # Cache in Redis for later /visualize/generate requests
-            if data.get("session_id"): await redis_save(data["session_id"], data, all_solutions)
+            if data.get("session_id"): await cache_maze(data["session_id"], data, all_solutions)
 
             
             # Schedule component report generation as a background task
