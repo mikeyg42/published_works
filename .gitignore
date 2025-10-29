@@ -21,3 +21,21 @@ node_modules/
 
 dist/
 /dist/*
+# Rust build artifacts
+target/
+simple_gpu_server/target/
+gpu_renderer/target/
+*.lock
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Temporary files
+*.tmp
+*.bak
+*~
+.DS_Store
+
+venv/
