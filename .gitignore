@@ -1,23 +1,41 @@
 # Rust build artifacts
-/target
+target/
+simple_gpu_server/target/
+gpu_renderer/target/
 Cargo.lock
 
 # Python caches
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.pyc
+*.pyo
 
 # VSCode or other IDE settings
 .vscode/
 
 # macOS files
 .DS_Store
+*.tmp
+*.bak
+*~
 
+# Virtual environment
 venv/
-/venv/*
 
+# Node modules
 node_modules/
-/node_modules/*
 
+# Build outputs
 dist/
-/dist/*
+
+# WebGPU training resources (PDFs and documentation)
+webgpu_resources/
+*.pdf
+
+# Test outputs and temporary files
+gpu_renderer/output.png
+test_maze_input_*.json
+
+# Random/temporary files
+bd40a666b1f7b8e33d94c48c
