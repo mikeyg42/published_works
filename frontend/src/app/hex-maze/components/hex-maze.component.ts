@@ -12,13 +12,9 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { MazeSolverService, ProcessedConnComponent } from '../services/maze-solver.service';
-import { MainAnimation } from '../services/main_animation';
-import { MazeGeneratorService, PathMap } from '../services/maze-generator.service';
+import { MainAnimationGPU } from '../services/main_animation_gpu';
 import { Subscription, fromEvent } from 'rxjs';
 import { debounceTime, distinctUntilChanged } from 'rxjs/operators';
-import { VonGridService } from '../services/von-grid.service';
-import { PathTracerService } from '../services/pathTracing_webgpu.service';
 
 @Component({
   selector: 'app-hex-maze',
@@ -43,12 +39,15 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
   private height: number = 0;
   private lastWindowSize: { width: number; height: number } = { width: 0, height: 0 };
 
-  // Maze data and conversion maps
-  private pathMap: PathMap | null = null;
+  // Maze data will come from backend via WebSocket
+  private mazeData: any = null;
 
-  // Animation and solved paths
-  private solvedComponents: ProcessedConnComponent[] = [];
+  // Animation and session management
   private sessionId: string | null = null;
+  private animationWs: WebSocket | null = null;
+  private isProcessingFrame = false;
+  private frameBuffer: Blob[] = [];
+  private maxBufferSize = 5; // Buffer up to 5 frames
 
   private animationFrameId: number | null = null;
 
@@ -57,15 +56,10 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
   private resizeSubscription?: Subscription;
 
   // Main animation controller
-  private mazeAnimator: MainAnimation | null = null;
+  private mazeAnimator: MainAnimationGPU | null = null;
 
   constructor(
-    //private mazeApi: MazeApiService,
-    private mazeSolver: MazeSolverService,
-    private mazeGenerator: MazeGeneratorService,
     private ngZone: NgZone,
-    private vonGridService: VonGridService,
-    public pathTracerService: PathTracerService,
     private injector: Injector
   ) {}
 
@@ -109,6 +103,11 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
     if (this.resizeSubscription) {
       this.resizeSubscription.unsubscribe();
     }
+    if (this.animationWs) {
+      this.animationWs.close();
+    }
+    // Clear frame buffer
+    this.frameBuffer = [];
     this.mazeAnimator?.dispose();
   }
 
@@ -125,13 +124,11 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
     
     const container = this.mazeCanvasRef.nativeElement;
     
-    // Create MainAnimation instance - it will create its own canvas via MazeSceneManager
+    // Create MainAnimationGPU instance - supports both GPU and Three.js rendering
     this.ngZone.runOutsideAngular(() => {
-      this.mazeAnimator = new MainAnimation(
+      this.mazeAnimator = new MainAnimationGPU(
         container,
-        this.ngZone,
-        this.vonGridService,
-        this.pathTracerService
+        this.ngZone
       );
       
       // Wait for the underlying SceneManager to finish initialization
@@ -174,34 +171,14 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
       this.width = container.clientWidth;
       this.height = container.clientHeight;
 
-      // Generate maze locally using MazeGeneratorService
-      this.pathMap = await this.mazeGenerator.generateMaze(
-        this.width, 
-        this.height
-      );
-    
-      console.log('Received data from maze generator:', this.pathMap);
+      // Maze generation now handled by backend
+      // Just request maze generation and solution via WebSocket
 
-      // Short delay to allow the maze to be drawn (if needed)
-      await new Promise(resolve => setTimeout(resolve, 400));
-
-      // CRITICAL FIX: Create maze FIRST, then solve - avoid race condition
-      console.log('🏗️ Step 1: Building 3D maze geometry...');
-      await this.mazeAnimator.createMaze(this.pathMap); // Build the 3D maze first
-      console.log('✅ Step 1 complete: 3D maze geometry built');
-
-      console.log('🧩 Step 2: Solving maze...');
-      await this.solveMaze(); // Then solve the maze
-      console.log('✅ Step 2 complete: Maze solved');
-
-      // Now that the maze is drawn and solutions are ready, animate them.
-      this.isAnimating = true; // Maybe set this before or after animation starts? Depends on desired UI behavior.
-      this.statusMessage = 'Animating solution...';
-      await this.animateMaze(); // Animate the solution paths.
-
-      // Animation finished (or started, if animateMaze doesn't block until done)
-      this.isAnimating = false; // Set to false when animation is complete
-      this.statusMessage = 'animation finished!';
+      console.log('🧩 Step 2: Starting dual WebSocket animation...');
+      this.isAnimating = true;
+      this.statusMessage = 'Connecting to animation streams...';
+      await this.startDualWebSocketAnimation(); // Connect to both backends
+      console.log('✅ Step 2 complete: Animation streaming started');
 
       
     } finally {
@@ -212,48 +189,196 @@ export class HexMazeComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   /**
-   * Solve the current maze.
+   * Start dual WebSocket animation using stateless backend approach
    */
-  private async solveMaze(): Promise<void> {
-    
+  private async startDualWebSocketAnimation(): Promise<void> {
     try {
-      // Create the proper maze data structure expected by the solver
-      if (!this.pathMap || !this.mazeAnimator) {
-        this.statusMessage = 'No maze to solve';
-        this.isGenerating = false;
-        return;
-      }
-      
-      // Solve the maze.
-      const [solvedComponents, sessionId] = await this.mazeSolver.solveMaze(this.pathMap);
-      this.solvedComponents = solvedComponents;
-      this.sessionId = sessionId;
-    
-      this.statusMessage = `Found ${this.solvedComponents.length} solution path(s) for session ${sessionId}`;
-      return ;
+      // Generate session ID
+      this.sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+
+      // Start WebSocket #1: Maze solving (Backend #1) - this will generate the maze too
+      this.connectToMazeSolver();
+
+      // Start WebSocket #2: Animation streaming (Backend #2)
+      this.connectToAnimationStream();
+
     } catch (error) {
-      console.error('Maze solving error:', error);
-      this.statusMessage = `Solving error: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      console.error('WebSocket connection error:', error);
+      this.statusMessage = `Connection error: ${error instanceof Error ? error.message : 'Unknown error'}`;
     }
   }
-  private async animateMaze(): Promise<void> {
-    // 1) Fast guard clauses
-    if (!this.mazeAnimator) {
-      this.statusMessage = 'Renderer not ready';
-      return;
+  /**
+   * Connect to Backend #1 for maze solving via WebSocket
+   */
+  private connectToMazeSolver(): void {
+    const wsUrl = 'ws://localhost:8000/api/maze-solver';
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      console.log('Connected to maze solver WebSocket');
+      // Request maze generation and solution with device fingerprint
+      ws.send(JSON.stringify({
+        session_id: this.sessionId,
+        canvas_width: this.width,
+        canvas_height: this.height,
+        device_fingerprint: 'frontend_client',
+        user_agent: navigator.userAgent,
+        accept_language: navigator.language
+      }));
+    };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.type === 'processing_started') {
+        this.statusMessage = 'Generating maze and solving...';
+      } else if (data.type === 'solution') {
+        this.statusMessage = `Found ${data.solution_paths?.length || 0} solution paths`;
+        this.mazeData = data.maze_data; // Store maze data received from backend
+        console.log('Received maze and solution from Backend #1:', data);
+
+        // Now create the 3D visualization from backend maze data
+        if (this.mazeAnimator && this.mazeData) {
+          this.mazeAnimator.createMaze(this.mazeData);
+        }
+      } else if (data.type === 'visualization_ready') {
+        this.statusMessage = 'Visualization ready, starting animation stream...';
+        console.log('Visualization ready from Backend #1');
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('Maze solver WebSocket error:', error);
+      this.statusMessage = 'Failed to connect to maze solver';
+    };
+
+    ws.onclose = () => {
+      console.log('Maze solver WebSocket closed');
+    };
+  }
+
+  /**
+   * Connect to Backend #2 for animation frame streaming via WebSocket
+   */
+  private connectToAnimationStream(): void {
+    const wsUrl = 'ws://localhost:3030/stream';
+    this.animationWs = new WebSocket(wsUrl);
+
+    this.animationWs.onopen = () => {
+      console.log('Connected to animation stream WebSocket');
+      // Send session ID to start streaming
+      this.animationWs!.send(JSON.stringify({
+        session_id: this.sessionId
+      }));
+    };
+
+    this.animationWs.onmessage = (event) => {
+      if (event.data instanceof Blob) {
+        // Check if this is a small JSON message (pong) disguised as binary
+        if (event.data.size < 1000) {
+          // Small blobs might be JSON messages sent as binary
+          event.data.text().then(text => {
+            try {
+              const data = JSON.parse(text);
+              if (data.type === 'pong') {
+                console.log('Received pong from animation server');
+              } else if (data.type === 'ping') {
+                this.animationWs!.send(JSON.stringify({ type: 'pong' }));
+              }
+            } catch (e) {
+              // Not JSON, treat as frame data
+              this.frameBuffer.push(event.data);
+              this.manageFrameBuffer();
+            }
+          });
+        } else {
+          // Large blob, definitely a frame
+          this.frameBuffer.push(event.data);
+          this.manageFrameBuffer();
+        }
+      } else {
+        // Text message (ping/pong or status)
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'ping') {
+            this.animationWs!.send(JSON.stringify({ type: 'pong' }));
+          } else if (data.type === 'pong') {
+            console.log('Received pong from animation server');
+          }
+        } catch (e) {
+          console.log('Received non-JSON text from animation server:', event.data);
+        }
+      }
+    };
+
+    this.animationWs.onerror = (error) => {
+      console.error('Animation stream WebSocket error:', error);
+      this.statusMessage = 'Failed to connect to animation stream';
+    };
+
+    this.animationWs.onclose = () => {
+      console.log('Animation stream WebSocket closed');
+      this.isAnimating = false;
+      this.statusMessage = 'Animation stream ended';
+      this.animationWs = null;
+    };
+  }
+
+  /**
+   * Process frames from buffer sequentially
+   */
+  private manageFrameBuffer(): void {
+    // If buffer is too large, remove oldest frame
+    if (this.frameBuffer.length > this.maxBufferSize) {
+      console.log(`Buffer overflow, dropping oldest frame (buffer size: ${this.frameBuffer.length})`);
+      this.frameBuffer.shift();
     }
-    if (!this.solvedComponents?.length) {
-      this.statusMessage = 'No maze to animate';
+
+    // Start processing if not already processing
+    if (!this.isProcessingFrame) {
+      this.processFrameBuffer();
+    }
+  }
+
+  private async processFrameBuffer(): Promise<void> {
+    if (this.isProcessingFrame || this.frameBuffer.length === 0) {
       return;
     }
 
-    // 2) Do the animation
-    try {
-      await this.mazeAnimator.animatePaths(this.solvedComponents);
-    } catch (error) {
-      console.error('Maze animation error:', error);
-      this.statusMessage =
-        `Animation error: ${error instanceof Error ? error.message : 'Unknown error'}`;
+    this.isProcessingFrame = true;
+
+    while (this.frameBuffer.length > 0) {
+      const frameBlob = this.frameBuffer.shift()!;
+
+      try {
+        // Create blob URL and display frame
+        const frameUrl = URL.createObjectURL(frameBlob);
+
+        // Update the maze animator with the new frame
+        if (this.mazeAnimator) {
+          await this.mazeAnimator.displayGpuImage(frameUrl);
+        }
+
+        // Clean up the blob URL
+        URL.revokeObjectURL(frameUrl);
+      } catch (error) {
+        console.error('Frame processing error:', error);
+        // Continue processing remaining frames despite error
+      }
+    }
+
+    this.isProcessingFrame = false;
+  }
+
+  /**
+   * Legacy method - now redirects to buffer processing
+   */
+  private async handleAnimationFrame(frameBlob: Blob): Promise<void> {
+    // This method is kept for backward compatibility
+    // All frame handling now goes through the buffer
+    this.frameBuffer.push(frameBlob);
+    if (!this.isProcessingFrame) {
+      this.processFrameBuffer();
     }
   }
   

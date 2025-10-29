@@ -1,0 +1,21 @@
+[package]
+name = "simple-gpu-server"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "simple-gpu-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+warp = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures-util = "0.3"
+image = "0.24"
+log = "0.4"
+env_logger = "0.10"

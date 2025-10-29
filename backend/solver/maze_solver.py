@@ -6,7 +6,6 @@ import asyncio
 import concurrent.futures
 import os
 import time
-from backend.visualizer.graph_visualizer import GraphVisualizer
 from ortools.sat.python import cp_model
 from ortools.sat.python.cp_model import CpModel, CpSolver
 import random
@@ -18,14 +17,13 @@ from datetime import datetime
 from typing import Union
 import numpy as np
 import importlib.util
-from redis_cache import cache_maze 
+# Redis caching temporarily disabled for simplified backend 
 
 
 GraphLike = Union[nx.Graph, nx.DiGraph, nx.MultiGraph, dict[str, list[str]]]
 
 class MazeSolver:
     def __init__(self, output_dir: str = "maze_viz"):
-        self._image_counter = 0
         self._output_dir = output_dir
         
         # Only create the directory if not running in Cloud Run (or similar env)
@@ -41,7 +39,6 @@ class MazeSolver:
                     self._output_dir = "tmp"
                     pass
  
-        self.visualizer = GraphVisualizer(output_dir=self._output_dir, in_memory=is_cloud_run)
         
         # Track active solving tasks
         self._active_tasks = weakref.WeakValueDictionary()
@@ -607,7 +604,7 @@ class MazeSolver:
             print(f"Final solution lengths: {solution_lengths}")
 
             # Cache in Redis for later /visualize/generate requests
-            if data.get("session_id"): await cache_maze(data["session_id"], data, all_solutions)
+            # Cache temporarily disabled for simplified backend
 
             
             # Schedule component report generation as a background task
@@ -1350,182 +1347,7 @@ class MazeSolver:
             return []
 
     
-    def _visualize_path(self, adjacency_dict: Dict[str, List[str]], path: List[str], component_idx: int, dimensions: Dict[str, int]) -> None:
-        """Visualize the graph and path using the GraphVisualizer."""
-        try:
-            if not path:
-                return
-            if self.visualizer is None:
-                print("Visualizer not initialized, skipping visualization")
-                return
             
-            # Use our GraphVisualizer for visualization
-            self._image_counter += 1
-            
-            # Generate both regular graph and hexagonal visualizations
-            self.visualizer.visualize_graph(
-                dimensions,
-                adjacency_dict,
-                path=path,
-                title=f"Component {component_idx}",
-                filename_prefix=f"component_{component_idx}_{self._image_counter}"
-            )
-            
-            self.visualizer.visualize_hexagonal_tiling(
-                dimensions,
-                adjacency_dict,
-                path,
-                title=f"Component {component_idx} Hex Tiling",
-                filename_prefix=f"hex_component_{component_idx}_{self._image_counter}"
-            )
-            
-        except Exception as e:
-            print(f"Visualization error: {str(e)}")
-            
-    async def generate_component_report(self, data: dict, all_solutions: List[List[str]], websocket=None):
-        """
-        Generate a comprehensive visualization of all components and their longest paths.
-        Upload it to GCS and send the URL to the client.
-        
-        Args:
-            data: The original maze data
-            all_solutions: The solutions for each component
-            websocket: The WebSocket connection to the client
-        """
-        try:
-            # Skip if client disconnected
-            if websocket and not websocket.client_state.CONNECTED:
-                print("Client disconnected, skipping component report generation")
-                return
-                
-            print("Generating component report visualization...")
-            
-            # Get session ID, generating one if not provided
-            session_id = data.get('session_id')
-            if not session_id:
-                session_id = f"session_{int(time.time())}_{random.randint(1000, 9999)}"
-                print(f"No session_id provided, generated new one: {session_id}")
-            
-            # Prepare components data for visualization
-            components_data = []
-            for i, solution in enumerate(all_solutions):
-                if i < len(data['components']) and solution:
-                    # Extract component adjacency dict
-                    adjacency = data['components'][i]
-                    
-                    # Create component data
-                    component = {
-                        'id': i + 1,  # 1-indexed for display
-                        'nodes': list(adjacency.keys()),
-                        'adjacency': adjacency,
-                        'longest_path': solution
-                    }
-                    components_data.append(component)
-            
-            # Skip if no components with solutions
-            if not components_data:
-                print("No components with solutions to visualize")
-                if websocket and websocket.client_state.CONNECTED:
-                    await websocket.send_json({
-                        "type": "visualization_error",
-                        "error": "No components with solutions to visualize"
-                    })
-                return
-                
-            # Get dimensions from data
-            dimensions = data.get('dimensions', {'rows': 0, 'cols': 0})
-            if dimensions['rows'] == 0 or dimensions['cols'] == 0:
-                if websocket and websocket.client_state.CONNECTED:
-                    await websocket.send_json({
-                        "type": "visualization_error",
-                        "error": "No dimensions available in the data for visualization"
-                    })
-                return
-                
-            
-            # Generate the visualization synchronously in this function
-            # to ensure it's completed before the connection closes
-            print(f"Creating visualization for {len(components_data)} components...")
-            # Use the instance visualizer created during __init__
-            visualizer = self.visualizer 
-            try: 
-                # Use executor to avoid blocking the event loop with CPU-bound task
-                loop = asyncio.get_running_loop()
-                image_bytes = await loop.run_in_executor(
-                    None,
-                    lambda: visualizer.create_component_report(
-                        dimensions,
-                        components_data,
-                        return_bytes=True
-                    )
-                )
-                print(f"Visualization generated: {len(image_bytes)} bytes")
-            except Exception as e:
-                print(f"Error generating visualization: {str(e)}")
-                if websocket and websocket.client_state.CONNECTED:
-                    await websocket.send_json({
-                        "type": "visualization_error",
-                        "error": f"Failed to generate visualization: {str(e)}"
-                    })
-                    
-            try:
-                print(f"now uploading visualization to GCS bucket '{bucket_name}', blob '{blob_name}'...")
-            
-                # Upload to GCS
-                bucket_name = os.environ.get("GCS_BUCKET_NAME", "maze-solver-visualizations")
-                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                blob_name = f"visualizations/{session_id}/{timestamp}.png"
-                # Upload in a non-blocking way but wait for completion
-                url = await loop.run_in_executor(
-                    None,
-                    lambda: upload_bytes_to_gcs(bucket_name, blob_name, image_bytes)
-                )
-                
-                print(f"Component report uploaded to: {url}")
-            except Exception as e:
-                print(f"Error uploading component report: {str(e)}")
-                if websocket and websocket.client_state.CONNECTED:
-                    await websocket.send_json({
-                        "type": "visualization_error",
-                        "error": f"Failed to upload visualization: {str(e)}"
-                    })
-            
-            # Notify client if WebSocket is still connected
-            if websocket and websocket.client_state.CONNECTED:
-                print(f"Sending visualization_ready message with URL: {url}")
-                await websocket.send_json({
-                    "type": "visualization_ready",
-                    "url": url,
-                    "session_id": session_id,
-                    "timestamp": timestamp,
-                    "access_url": f"/api/visualize/{session_id}"
-                })
-                print("Visualization message sent successfully")
-            else:
-                print("WebSocket not available, visualization ready but not sent to client")
-                
-        except Exception as e:
-            print(f"Error generating component report: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            
-            # Try to inform the client
-            if websocket and websocket.client_state.CONNECTED:
-                await websocket.send_json({
-                    "type": "visualization_error",
-                    "error": f"Failed to generate visualization: {str(e)}"
-                })
-                
-            # Save the error for debugging
-            error_file = os.path.join(self._output_dir, f"visualization_error_{int(time.time())}.txt")
-            try:
-                with open(error_file, "w") as f:
-                    f.write(f"Error generating visualization: {str(e)}\n")
-                    f.write(f"Data: {json.dumps(data, indent=2)}\n")
-                    f.write(f"Solutions: {json.dumps(all_solutions, indent=2)}\n")
-                    traceback.print_exc(file=f)
-            except:
-                print("Could not write error file")
     
     # NOTE: This method is now deprecated as visualize_clockwise_ordering was removed from GraphVisualizer
     # It's kept as a stub for backwards compatibility but will log a warning
@@ -1552,8 +1374,6 @@ class MazeSolver:
             # Verify solution
             result, valid = self._verify_solution(G, path, adjacency_dict, check_longest)
             
-            # Always visualize even if the solution is suboptimal
-            self._visualize_path(adjacency_dict, path, component_idx, dimensions)
             
             return result, valid
         except Exception as e:
@@ -1687,96 +1507,4 @@ class MazeSolver:
         sol.sort(key=lambda x: x[1])
         return [node for node, _ in sol]
 
-    async def _generate_component_report_for_rest(self, data: dict, all_solutions: List[List[str]]) -> dict:
-        """
-        Generate component report for REST API calls without WebSocket messaging.
-        Returns visualization metadata instead of sending WebSocket messages.
-        """
-        try:
-            print("Generating component report visualization for REST API...")
-            
-            # Get session ID, generating one if not provided
-            session_id = data.get('session_id')
-            if not session_id:
-                session_id = f"session_{int(time.time())}_{random.randint(1000, 9999)}"
-                print(f"No session_id provided, generated new one: {session_id}")
-            
-            # Prepare components data for visualization (same as in generate_component_report)
-            components_data = []
-            for i, solution in enumerate(all_solutions):
-                if i < len(data['components']) and solution:
-                    # Extract component adjacency dict
-                    adjacency = data['components'][i]
-                    
-                    # Create component data
-                    component = {
-                        'id': i + 1,  # 1-indexed for display
-                        'nodes': list(adjacency.keys()),
-                        'adjacency': adjacency,
-                        'longest_path': solution
-                    }
-                    components_data.append(component)
-            
-            # Skip if no components with solutions
-            if not components_data:
-                print("No components with solutions to visualize")
-                return {"status": "no_components"}
-            
-            # Get dimensions from data
-            dimensions = data.get('dimensions', {'rows': 0, 'cols': 0})
-            if dimensions['rows'] == 0 or dimensions['cols'] == 0:
-                print("No dimensions available for visualization")
-                return {"status": "no_dimensions"}
-            
-            # Generate the visualization
-            print(f"Creating visualization for {len(components_data)} components...")
-            visualizer = self.visualizer 
-            try:
-                # Use executor to avoid blocking the event loop
-                loop = asyncio.get_running_loop()
-                image_bytes = await loop.run_in_executor(
-                    None,
-                    lambda: visualizer.create_component_report(
-                        dimensions,
-                        components_data,
-                        return_bytes=True
-                    )
-                )
-                print(f"Visualization generated: {len(image_bytes)} bytes")
-            except Exception as e:
-                print(f"Error generating visualization: {str(e)}")
-                return {"status": "visualization_error", "error": str(e)}
-            
-            try:
-                # Upload to GCS
-                bucket_name = os.environ.get("GCS_BUCKET_NAME", "maze-solver-visualizations")
-                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                blob_name = f"visualizations/{session_id}/{timestamp}.png"
-                
-                # Upload in a non-blocking way but wait for completion
-                url = await loop.run_in_executor(
-                    None,
-                    lambda: upload_bytes_to_gcs(bucket_name, blob_name, image_bytes)
-                )
-                
-                print(f"Component report uploaded to: {url}")
-                
-                # Return visualization metadata
-                return {
-                    "status": "success",
-                    "url": url,
-                    "session_id": session_id,
-                    "timestamp": timestamp,
-                    "access_url": f"/api/visualize/{session_id}"
-                }
-                
-            except Exception as e:
-                print(f"Error uploading component report: {str(e)}")
-                return {"status": "upload_error", "error": str(e)}
-            
-        except Exception as e:
-            print(f"Error generating component report for REST: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return {"status": "error", "error": str(e)}
 

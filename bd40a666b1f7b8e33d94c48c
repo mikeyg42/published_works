@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+	<head>
+	<title>Mirror for: DrugHub - Daunt</title>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link rel="stylesheet" href="/css/daunt.css" />
+	<link rel="stylesheet" href="/css/cache/dynamic.css" />
+</head>	<body>
+		<div class="container">
+			<div class="jsWarning">
+	<input type="radio" name="popout_btn" value="open" checked />
+	<input type="radio" name="popout_btn" value="close" />
+	
+	<div class="popout-bg"></div>
+	
+	<div class="popout-box centered">		
+		<div class="heading" style="color:red;">Warning!</div>
+		<p>You have JavaScript enabled, you are putting yourself at risk!</p>
+		<p>Please disable it immediately!</p>
+	</div>
+</div>
+
+<noscript>
+<style>.jsWarning { display: none !important; }</style>
+</noscript>
+
+<header>
+	<div class="centerWrap">
+		<a href="/" class="dreadLogo">
+			<div class="square"></div>
+			<div class="text">daunt</div>
+		</a>
+		
+		<nav class="subdreadQuick">
+			<ul>
+				<li><a href="/">directory</a></li>
+				<li><a href="/about/">about</a></li>
+				<li><a href="/faq/">faq</a></li>
+			</ul>
+		</nav>
+		
+		<nav class="userNav">
+							<div class="no_auth">
+					<a href="/auth/login">Login</a>
+				</div>
+					</nav>
+	</div>
+</header>			
+			<div class="content lg">
+								
+				<div class="service-view-page">
+					<div class="service-main">
+						<a href="/view/DrugHub" id="service-icon-83" class="icon"></a>
+						<div class="right">
+							<div class="name"><a href="/view/DrugHub">DrugHub</a></div>
+							<a href="/?filter=markets" class="category">Markets</a>
+						</div>
+						
+						<div class="extra">
+							<div class="item">
+								<div class="icon eye"><span><i class="gg-eye-alt"></i></span></div>
+								<div class="label">252313</div>
+							</div>
+							
+													</div>
+					</div>
+					
+												<div class="mirror_view">
+								<h3>Mirror [bd40a666b1f7b8e33d94c48c]</h3>
+								
+								<div class="mirror-url">drughub666py6fgnml5kmxa7fva5noppkf6wkai4fwwvzwt4rz645aqd.onion</div>
+								
+								<h4>PGP Signed Verification</h4>
+								
+								<textarea class="signed">-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+http://drughub666py6fgnml5kmxa7fva5noppkf6wkai4fwwvzwt4rz645aqd.onion/
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEE2gj6w49XMbMfxaHuDfd5IJiDjfUFAmXYTccACgkQDfd5IJiD
+jfVeUBAAqOfPwevi2mChpD8w+q6B+zDmzuutyz3clTTyfiqMPlHHYxokl3YWFZer
+LafsKRuhNlqhNv3R4QPGGzuQQ7zot7shXxG2dckd+bkOUO6YN4bu6fOfVDgG8baY
+CpQLxM2E+kEbK9gc0F4GIax3H4dJsrr10L3JcU0HrB8Ay7/EDwqvEPo7XxA78M8x
+dalMMMTQMCSrrHFV6QzzUKoKTHHPD3M9e+N9CFsfKLJFk95Bu43vkymqS59nQ4tM
+GeofwwJvsybeO5hrT+56+alajtf7ylcpCzvLmTL7ubX2zb+PWFgTaarJOkdh/Qlt
+voX4vk1hbKRhn6YQ+5jbl8seMSaUDMttPxnUcuWwfOxbsnA2lCf9k6YwCxl1ddCu
+pceTiYnmx2/+ov4RVfzksZbj0W+vt026sdplV+wZsv3e9/8oC1KYnikWEtqZ3xgz
+RrGw7ONl5CM53yI7unVNUGazuFPVAfN/7sWB9sqOQGUtl4p/8w+qX7K9uSMIbC0p
+p3/NjDV0UTxyuthv0mtVcRvTJaEikH2DwS1FdrgPjvA29ZNiB9Kd5Z7P/mOKJ5Uo
+OLQ5TYEpPexwDJ23zsexV6a5SGJNtLbVxZY3qX3+tqvepUFZ/LophlGNjs+naYfs
+rP8fkOFEPh6TmGiS02o6fpCYxZge3XFww/WGGjxDu0bTsbTLSQs=
+=pRI0
+-----END PGP SIGNATURE-----</textarea>
+								
+								<div class="timestamp" title="23rd February, 2024">Imported 2 year(s) ago </div>
+								
+								<a href="/view/DrugHub" class="standardBtn">View all mirrors</a>
+							</div>
+									</div>
+				
+				<footer>
+	<div class="centerWrap">
+		<a href="/" class="dreadLogo">
+			<div class="square"></div>
+			<div class="text">daunt</div>
+		</a>
+		
+		<div class="columns">
+			<div class="item">
+				<div class="heading">About</div>
+				<div><a href="/about/">What is Daunt?</a></div>
+				<div><a href="/faq/">FAQ</a></div>
+				<div><a href="/ad/">Advertising</a></div>
+			</div>
+			<div class="item">
+				<div class="heading">Directory</div>
+				<div><a href="/?filter=forums">Forums</a></div>
+				<div><a href="/?filter=markets">Markets</a></div>
+				<div><a href="/?filter=shops">Shops</a></div>
+				<div><a href="/?filter=other">Other</a></div>
+			</div>
+			<div class="item">
+				<div class="heading">Network</div>
+				<div class="external"><a href="/view/dread" target="_blank">Dread</a></div>
+				<div class="external"><a href="/view/recon" target="_blank">Recon</a></div>
+				<div class="external"><a href="/" target="_blank">Daunt</a></div>
+			</div>
+		</div>
+	</div>
+</footer>			</div>
+		</div>
+	</body>
+</html>

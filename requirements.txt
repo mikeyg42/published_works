@@ -7,3 +7,4 @@ numpy>=1.23
 matplotlib>=3.5
 ortools>=9.0
 google-cloud-storage>=2.0
+httpx>=0.25

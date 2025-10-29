@@ -31,6 +31,6 @@ if ! pgrep -x "redis-server" > /dev/null; then
 fi
 
 # Navigate to backend directory and start server
-echo "🔧 Starting FastAPI server on http://0.0.0.0:8000"
+echo "🔧 Starting FastAPI server on https://0.0.0.0:8000"
 cd backend
-exec uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+exec uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000 --ssl-keyfile=../frontend/ssl/server.key --ssl-certfile=../frontend/ssl/server.crt
