@@ -1,0 +1,80 @@
+[package]
+name = "maze-gpu-renderer"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75"
+
+[lib]
+name = "maze_gpu_renderer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "maze-gpu-renderer"
+path = "src/main.rs"
+
+[[example]]
+name = "material_loader_demo"
+path = "examples/material_loader_demo.rs"
+
+[dependencies]
+# Core WebGPU - Stable v22.1 for reliable compilation
+wgpu = { version = "22.1.0", default-features = false, features = ["wgsl", "vulkan-portability"] }
+bytemuck = { version = "1.18", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+
+# Command line interface (added in rewrite)
+clap = { version = "4.5", features = ["derive"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Image I/O - only PNG needed for headless
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Random numbers (used in pathTracer)
+rand = "0.8"
+
+# Compile-time assertions (added in rewrite)
+static_assertions = "1.1"
+
+# Data structures (added in rewrite for LRU cache)
+linked-hash-map = "0.5"
+
+# HTTP server dependencies
+warp = "0.3"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+futures-util = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+
+# Animation system dependencies (Three.js migration)
+futures = "0.3"
+futures-intrusive = "0.5"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.5"
+
+[package.metadata.docs.rs]
+all-features = false
+default-target = "x86_64-unknown-linux-gnu"
+
+# Platform-specific dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+# For better GPU enumeration on Linux
+libc = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native-only dependencies
+num_cpus = "1.16"

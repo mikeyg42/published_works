@@ -3,10 +3,15 @@
 FROM python:3.12-bookworm as builder
 WORKDIR /app
 
-# Install Rust using rustup for better control and consistency
+# Install Rust and Node.js using rustup and NodeSource for better control and consistency
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      curl build-essential pkg-config openssl libssl-dev \
+      curl build-essential pkg-config openssl libssl-dev ca-certificates gnupg \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 18.x LTS
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+ && apt-get install -y nodejs \
  && rm -rf /var/lib/apt/lists/*
 
 # Explicitly upgrade zlib1g to the fixed version if available
@@ -41,6 +46,10 @@ RUN pip install --no-cache-dir /wheels/*.whl
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install Node.js dependencies for maze generation
+COPY backend/maze_generation_ts/package.json ./backend/maze_generation_ts/
+RUN cd backend/maze_generation_ts && npm install
+
 # Now copy the rest of your app sources and install the package itself
 COPY . .
 RUN pip install --no-cache-dir .
@@ -67,10 +76,12 @@ RUN pip install --no-cache-dir .
 FROM python:3.12-slim-bookworm
 WORKDIR /home/appuser/app
 
-# # (not needed currently) install any OS-level libs your Rust ext. needs. Keep, in case you change Rust code significantly.
-# RUN apt-get update \
-#   && apt-get install -y --no-install-recommends <libdeps> \
-#   && rm -rf /var/lib/apt/lists/*
+# Install Node.js runtime for TypeScript maze generation
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+ && curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+ && apt-get install -y nodejs \
+ && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN useradd --create-home appuser
@@ -79,6 +90,7 @@ USER appuser
 # Copy venv (with all Python & Rust deps) and your backend code
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder --chown=appuser:appuser /app/backend ./backend
+COPY --from=builder --chown=appuser:appuser /app/redis_cache ./redis_cache
 
 # Activate venv
 ENV PATH="/opt/venv/bin:$PATH"

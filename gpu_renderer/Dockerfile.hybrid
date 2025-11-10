@@ -1,0 +1,42 @@
+# Multi-stage build: compile in first stage, runtime in second
+FROM rust:latest AS builder
+
+WORKDIR /build
+
+# Copy just the dependency files first for better caching
+COPY Cargo.toml ./
+COPY src ./src
+
+# Build with optimizations for size
+RUN cargo build --release --target x86_64-unknown-linux-gnu
+
+# Runtime stage with minimal dependencies
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libvulkan1 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the compiled binary from builder stage
+COPY --from=builder /build/target/x86_64-unknown-linux-gnu/release/maze-gpu-renderer ./maze-gpu-renderer
+COPY src/test_maze.json ./src/test_maze.json
+
+# Set environment variables
+ENV RUST_LOG=info
+ENV WGPU_BACKEND=vulkan
+
+# Expose port
+EXPOSE 8080
+
+# Create output directory
+RUN mkdir -p /app/output
+
+# Make binary executable and set as entrypoint
+RUN chmod +x ./maze-gpu-renderer
+CMD ["./maze-gpu-renderer", "--server"]

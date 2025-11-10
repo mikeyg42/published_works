@@ -1,0 +1,14 @@
+{
+  "name": "maze-generation-ts",
+  "version": "1.0.0",
+  "description": "TypeScript maze generation for backend",
+  "main": "maze-generator-wrapper.js",
+  "scripts": {
+    "generate": "node maze-generator-wrapper.js"
+  },
+  "dependencies": {
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.0.0"
+  }
+}

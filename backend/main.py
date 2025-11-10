@@ -1,208 +1,258 @@
-from fastapi import FastAPI, APIRouter
+"""
+Main FastAPI application for Backend Service #1
+Properly integrated with consolidated Redis cache module
+"""
+from fastapi import FastAPI, APIRouter, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.websockets import WebSocket
-from backend.solver.maze_solver import MazeSolver
-import json
+from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 from contextlib import asynccontextmanager
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
+import json
 import time
-import random
 import datetime
 import asyncio
-import os
 import logging
-from google.cloud import storage
-from fastapi.responses import RedirectResponse, FileResponse, Response
-from fastapi import HTTPException
-from typing import List, Dict, Any
-from pydantic import BaseModel
+import httpx
+import subprocess
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+import uuid
 
-# Updated Redis imports
-from redis_cache import get_redis_cache, shutdown_cache
-from redis_cache.rate_limiting import AdaptiveRateLimiter
-from backend.middleware.fastapi_middleware import create_rate_limit_middleware
-import redis.asyncio as redis
+# ========== REDIS IMPORTS - SIMPLIFIED ==========
+# TODO: Re-enable Redis caching later - for now just focus on basic functionality
+
+# ========== BACKEND IMPORTS - NON-REDIS ONLY ==========
+from backend.config import settings  # App config (NO Redis settings)
+from backend.solver.maze_solver import MazeSolver
+from backend.models import (
+    # These are backend-specific models only
+    MazeSolveRequest,
+    MazeSolveResponse,
+    StreamlinedRequest,
+    StreamlinedResponse,
+    HealthCheckResponse,
+    ErrorResponse,
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: initialize services
+    """
+    Application lifespan manager - handles startup and shutdown
+    """
+    # ========== STARTUP ==========
     try:
-        # Initialize Redis cache - gracefully handle connection failures
-        from redis_cache.client import _cache_instance, OptimizedRedisCache
-        from redis_cache.config import get_redis_config
-
-        cache = None
-        rate_limiter = None
-
-        try:
-            if _cache_instance is None:
-                config = get_redis_config()
-                cache = OptimizedRedisCache(config)
-                await cache.initialize()
-                # Store in global singleton
-                import redis_cache.client as cache_module
-                cache_module._cache_instance = cache
-            else:
-                cache = _cache_instance
-
-            app.state.cache = cache
-            app.state.rate_limiter = AdaptiveRateLimiter(cache.client)
-            logging.info("✅ Redis cache and rate limiter initialized")
-
-        except Exception as redis_error:
-            logging.warning(f"⚠️ Redis connection failed: {redis_error}")
-            logging.warning("⚠️ App will run without Redis caching - features will degrade gracefully")
-
-            # Create a null cache object for graceful degradation
-            app.state.cache = None
-            app.state.rate_limiter = None
-
-        # Initialize maze solver queue
-        await app.state.maze_solver.start_queue_processor()
-        logging.info("Maze solver queue started")
-
-        # Start background cleanup task for rate limiter (only if Redis is available)
-        async def cleanup_task():
-            while True:
-                try:
-                    if hasattr(app.state, 'rate_limiter') and app.state.rate_limiter is not None:
-                        cleanup_count = await app.state.rate_limiter.cleanup_expired_keys()
-                        if cleanup_count > 0:
-                            logging.info(f"Cleaned up {cleanup_count} expired rate limit keys")
-                except Exception as e:
-                    logging.error(f"Rate limiter cleanup error: {e}")
-                await asyncio.sleep(3600)  # Run every hour
-
-        # Only start cleanup task if we have Redis
-        if app.state.rate_limiter is not None:
-            app.state.cleanup_task = asyncio.create_task(cleanup_task())
+        logger.info("="*50)
+        logger.info("Starting Backend Service #1")
+        logger.info("="*50)
+        
+        # Initialize Redis services (handles ALL Redis setup)
+        logger.info("Initializing Redis services...")
+        redis_services = await setup_redis()
+        
+        # Store Redis services in app state
+        app.state.redis = redis_services
+        app.state.cache = redis_services.cache
+        app.state.rate_limiter = redis_services.rate_limiter
+        app.state.maze_cache = redis_services.maze_cache
+        
+        # Log Redis status
+        if redis_services.is_healthy:
+            logger.info("✅ Redis services initialized successfully")
         else:
-            app.state.cleanup_task = None
-
+            logger.warning("⚠️ Redis unavailable - running in degraded mode")
+        
+        # Initialize maze solver
+        app.state.maze_solver = MazeSolver()
+        await app.state.maze_solver.start_queue_processor()
+        logger.info("✅ Maze solver initialized")
+        
+        logger.info("="*50)
+        logger.info("All services started successfully")
+        logger.info("="*50)
+        
     except Exception as e:
-        logging.error(f"Failed to initialize services: {e}")
+        logger.error(f"Failed to initialize services: {e}")
         raise
-
-    yield
-
-    # Shutdown: cleanup services
-    try:
-        if hasattr(app.state, 'cleanup_task'):
-            app.state.cleanup_task.cancel()
-            try:
-                await app.state.cleanup_task
-            except asyncio.CancelledError:
-                pass
-
-        await app.state.maze_solver.stop_queue_processor()
-        await shutdown_cache()
-        logging.info("Services shut down successfully")
-
-    except Exception as e:
-        logging.error(f"Error during shutdown: {e}")
-
-app = FastAPI(lifespan=lifespan, root_path="")
-
-# Configure CORS for both development and production
-origins = [
-    # Production
-    "https://michaelglendinning.com",
     
-    # Development - common local ports
-    "https://localhost:4200",    # Angular default
-    "https://localhost:3000",    # React/Next.js default
-    "https://localhost:8000",    # FastAPI/Django default
-    "https://localhost:8080",    # General development
-    "https://127.0.0.1:4200",
-    "https://127.0.0.1:3000",
-    "https://127.0.0.1:8000",
-    "https://127.0.0.1:8080",
-]
+    yield  # Application runs here
+    
+    # ========== SHUTDOWN ==========
+    try:
+        logger.info("="*50)
+        logger.info("Shutting down Backend Service #1")
+        logger.info("="*50)
+        
+        # Stop maze solver
+        if hasattr(app.state, 'maze_solver'):
+            await app.state.maze_solver.stop_queue_processor()
+            logger.info("✅ Maze solver stopped")
+        
+        # Shutdown Redis services
+        await teardown_redis()
+        logger.info("✅ Redis services shut down")
+        
+        logger.info("="*50)
+        logger.info("All services shut down successfully")
+        logger.info("="*50)
+        
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
 
-# Define allowed headers explicitly
-allowed_headers = [
-    "Accept",
-    "Accept-Language",
-    "Content-Language",
-    "Content-Type",
-    "Authorization", # If you plan to use authentication
-    "X-Requested-With",
-    # Add any other custom headers your frontend might send
-]
 
+# Create FastAPI app with lifespan
+app = FastAPI(
+    title=settings.API_TITLE,
+    description=settings.API_DESCRIPTION,
+    version=settings.API_VERSION,
+    lifespan=lifespan,
+    root_path=""  # Important for Cloud Run
+)
+
+# ========== MIDDLEWARE SETUP ==========
+# Order matters! Add middleware in reverse order of execution
+
+# 1. CORS middleware (should be one of the first to execute)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"], # Specify methods
-    allow_headers=allowed_headers, # Use the explicit list
+    allow_methods=["GET", "POST", "OPTIONS", "HEAD"],
+    allow_headers=settings.CORS_ALLOW_HEADERS,
+    expose_headers=settings.CORS_EXPOSE_HEADERS,
 )
 
-# Conditional Trusted Hosts
-allowed_hosts_config = ["michaelglendinning.com", "*"]
-# Check an environment variable (e.g., ENVIRONMENT) to add local hosts for development
-if os.environ.get("ENVIRONMENT", "production").lower() == "development":
-    print("Development environment detected: Allowing localhost/127.0.0.1 as trusted hosts.")
-    allowed_hosts_config.extend(["localhost", "127.0.0.1"])
-    allowed_hosts_config = list(set(allowed_hosts_config)) 
-
+# 2. Trusted Host middleware (security)
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=allowed_hosts_config, # Use the conditional list
+    allowed_hosts=settings.TRUSTED_HOSTS,
 )
 
-# Rate limiting middleware - will get rate limiter from app state
-rate_limit_middleware = create_rate_limit_middleware()
-app.add_middleware(rate_limit_middleware)
+# 3. Redis-specific middleware (from redis_cache module)
+app.add_middleware(create_rate_limit_middleware())
+app.add_middleware(create_cache_headers_middleware())
+app.add_middleware(create_redis_health_middleware())
+
+# 4. Security Headers Middleware (general security)
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    """Add security headers to all responses"""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-Request-ID"] = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+    return response
+
+# 5. Request Logging Middleware (observability)
+@app.middleware("http")
+async def log_requests(request, call_next):
+    """Log all incoming requests and responses"""
+    # Skip logging for health checks
+    if request.url.path in ["/health", "/metrics"]:
+        return await call_next(request)
+    
+    start_time = time.time()
+    
+    # Log request
+    logger.info(
+        f"Request: {request.method} {request.url.path} "
+        f"from {request.client.host if request.client else 'unknown'}"
+    )
+    
+    # Process request
+    response = await call_next(request)
+    
+    # Calculate duration
+    duration = time.time() - start_time
+    
+    # Log response
+    logger.info(
+        f"Response: {request.method} {request.url.path} "
+        f"status={response.status_code} duration={duration:.3f}s"
+    )
+    
+    # Add timing header
+    response.headers["X-Process-Time"] = f"{duration:.3f}"
+    
+    return response
+
+# ========== API ROUTES ==========
 
 router = APIRouter()
 
-# Define Pydantic models for request and response bodies for type safety
-class MazeSolveRequest(BaseModel):
-    components: List[Dict[str, List[str]]]
-    dimensions: Dict[str, int]
-    session_id: str | None = None # Optional session_id from client
-    # Add any other fields the frontend might send, like 'skip_rust'
-    skip_rust: bool | None = False
 
-class MazeSolveResponse(BaseModel):
-    session_id: str
-    data: List[List[str]]
+@router.get("/")
+async def root():
+    """Root endpoint - redirects to docs"""
+    return {"message": "Maze Solver API", "docs": "/docs"}
 
-class CacheQueryRequest(BaseModel):
-    target_width: int
-    target_height: int
-    max_results: int = 5
 
-class CacheQueryResponse(BaseModel):
-    cache_hits: List[Dict[str, Any]]
-    count: int
-    message: str
+@router.get("/health", response_model=HealthCheckResponse)
+async def health_check():
+    """Health check endpoint with Redis status"""
+    redis_health = await get_redis_health()
+    
+    # Determine overall health
+    if redis_health["overall_health"] == "healthy":
+        status = "healthy"
+    elif redis_health["redis_connected"]:
+        status = "degraded"
+    else:
+        status = "degraded"  # App still works without Redis
+    
+    return HealthCheckResponse(
+        status=status,
+        timestamp=datetime.datetime.utcnow().isoformat(),
+        version=settings.API_VERSION,
+        details={
+            "redis": redis_health["overall_health"],
+            "maze_solver": "healthy",
+        }
+    )
+
 
 @router.post("/api/cache/query", response_model=CacheQueryResponse)
 async def query_cache(request: CacheQueryRequest):
     """
     Query for compatible cached mazes based on canvas dimensions.
-    Returns available cache hits without device exclusion metadata.
     """
-    try:
-        from redis_cache.maze_cache import create_maze_cache
-        from redis_cache.client import get_redis_cache
-
-        # Create mock request info since we don't need device exclusion for queries
-        request_info = {"ip": "query", "user_agent": "", "accept_language": ""}
-
-        # Find compatible mazes using MazeCache instance
-        async with get_redis_cache() as cache:
-            maze_cache = await create_maze_cache(cache.client)
-            compatible_mazes = await maze_cache.find_compatible_mazes(
-                target_width=request.target_width,
-                target_height=request.target_height,
-            request_info=request_info,
-            max_results=request.max_results
+    # Check if maze cache is available
+    if not app.state.maze_cache:
+        # Return empty results if cache unavailable (graceful degradation)
+        return CacheQueryResponse(
+            cache_hits=[],
+            count=0,
+            message="Cache service temporarily unavailable"
         )
-
+    
+    try:
+        # Create request info for cache query
+        request_info = {
+            "device_fingerprint": request.device_fingerprint,
+            "ip": "query",
+            "user_agent": "",
+            "accept_language": "",
+        }
+        
+        # Query compatible mazes
+        compatible_mazes = await app.state.maze_cache.find_compatible_mazes(
+            target_width=request.target_width,
+            target_height=request.target_height,
+            request_info=request_info,
+            max_results=request.max_results,
+        )
+        
         # Format response
         cache_hits = []
         for maze_data, solutions in compatible_mazes:
@@ -212,362 +262,522 @@ async def query_cache(request: CacheQueryRequest):
                 "cols": dimensions.get('cols', 0),
                 "hexWidth": dimensions.get('hexWidth', 0),
                 "hexHeight": dimensions.get('hexHeight', 0),
-                "solution_count": len([sol for sol in solutions if sol]),
-                "resized_for_canvas": f"{request.target_width}x{request.target_height}"
+                "solution_count": len([s for s in solutions if s]),
+                "resized_for_canvas": f"{request.target_width}x{request.target_height}",
             })
-
+        
         return CacheQueryResponse(
             cache_hits=cache_hits,
             count=len(cache_hits),
-            message=f"Found {len(cache_hits)} compatible cached maze(s)"
+            message=f"Found {len(cache_hits)} compatible cached maze(s)",
+        )
+        
+    except Exception as e:
+        logger.error(f"Cache query error: {e}")
+        # Return empty results on error (graceful degradation)
+        return CacheQueryResponse(
+            cache_hits=[],
+            count=0,
+            message="Cache query failed"
         )
 
-    except Exception as e:
-        logging.error(f"Cache query error: {e}")
-        raise HTTPException(status_code=500, detail=f"Cache query failed: {str(e)}")
 
-@router.get("/api/cache/stats")
+@router.get("/api/cache/stats", response_model=CacheStatsResponse)
 async def get_cache_stats():
     """Get comprehensive cache statistics"""
+    if not app.state.maze_cache:
+        raise HTTPException(
+            status_code=503,
+            detail="Cache service not available"
+        )
+    
     try:
-        from redis_cache.maze_cache import create_maze_cache
-        from redis_cache.client import get_redis_cache
-
-        async with get_redis_cache() as cache:
-            maze_cache = await create_maze_cache(cache.client)
-        stats = await maze_cache.get_cache_stats()
-
-        # Add Redis client stats if available
-        if hasattr(app.state, 'cache'):
-            redis_stats = await app.state.cache.get_stats()
-            stats['redis_client'] = redis_stats
-
+        stats = await app.state.maze_cache.get_cache_stats()
+        
         # Add rate limiter stats if available
-        if hasattr(app.state, 'rate_limiter'):
-            rate_limit_stats = await app.state.rate_limiter.get_stats()
-            stats['rate_limiting'] = rate_limit_stats
-
-        return stats
-
+        if app.state.rate_limiter:
+            rl_stats = await app.state.rate_limiter.get_stats()
+            stats.update({"rate_limiter": rl_stats})
+        
+        return CacheStatsResponse(**stats)
+        
     except Exception as e:
-        logging.error(f"Cache stats error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get cache stats: {str(e)}")
-
-@router.get("/api/cache/cleanup")
-async def cleanup_cache():
-    """Manually trigger cache cleanup (admin endpoint)"""
-    try:
-        from redis_cache.maze_cache import create_maze_cache
-        from redis_cache.client import get_redis_cache
-
-        async with get_redis_cache() as cache:
-            maze_cache = await create_maze_cache(cache.client)
-        cleanup_count = await maze_cache.cleanup_expired_entries()
-
-        # Also cleanup rate limiter if available
-        rl_cleanup_count = 0
-        if hasattr(app.state, 'rate_limiter'):
-            rl_cleanup_count = await app.state.rate_limiter.cleanup_expired_keys()
-
-        return {
-            "status": "success",
-            "maze_cache_cleaned": cleanup_count,
-            "rate_limiter_cleaned": rl_cleanup_count,
-            "message": f"Cleaned up {cleanup_count} maze entries and {rl_cleanup_count} rate limit keys"
-        }
-
-    except Exception as e:
-        logging.error(f"Cache cleanup error: {e}")
-        raise HTTPException(status_code=500, detail=f"Cache cleanup failed: {str(e)}")
-
-@router.get("/api/visualize/{session_id}", response_model=None)
-async def get_visualization(session_id: str) -> Response:
-    try:
-        env = os.environ.get('ENVIRONMENT', 'production').lower()
-        bucket_name = os.environ.get("GOOGLE_STORAGE_BUCKET")
-
-        print(f"Visualization request for session {session_id} in '{env}' mode.")
-
-        if env == 'development':
-            # --- Development Logic: Look for local files only ---
-            local_prefix = f"visualizations/{session_id}/"
-            print(f"DEV MODE: Checking local path: {local_prefix}")
-            if os.path.exists(local_prefix):
-                files = [f for f in os.listdir(local_prefix) if os.path.isfile(os.path.join(local_prefix, f)) and f.endswith(".png")]
-                if files:
-                    # Sort by modification time (most recent first)
-                    latest_file = sorted(files, key=lambda f: os.path.getmtime(os.path.join(local_prefix, f)), reverse=True)[0]
-                    local_path = os.path.join(local_prefix, latest_file)
-                    print(f"DEV MODE: Found local visualization file: {local_path}")
-                    # Use FileResponse for local files
-                    return FileResponse(
-                        local_path,
-                        media_type="image/png",
-                        headers={
-                            "Access-Control-Allow-Origin": "*", # Consider restricting in real dev
-                            "Access-Control-Allow-Methods": "GET, OPTIONS",
-                            "Access-Control-Allow-Headers": "Content-Type",
-                            "Cache-Control": "no-cache"
-                        }
-                    )
-                else:
-                    print(f"DEV MODE: No local .png files found in: {local_prefix}")
-                    raise HTTPException(status_code=404, detail=f"DEV MODE: No local .png visualizations found for session: {session_id}")
-            else:
-                print(f"DEV MODE: Local directory does not exist: {local_prefix}")
-                raise HTTPException(status_code=404, detail=f"DEV MODE: Visualization directory not found locally for session: {session_id}")
-
-        else:
-            # --- Production Logic: Look in GCS only ---
-            if not bucket_name:
-                logging.error("PRODUCTION MODE ERROR: GOOGLE_STORAGE_BUCKET environment variable not set.")
-                raise HTTPException(status_code=500, detail="Server configuration error: Storage bucket not specified.")
-
-            try:
-                client = storage.Client()
-                bucket = client.bucket(bucket_name)
-                prefix = f"visualizations/{session_id}/"
-                print(f"PROD MODE: Listing GCS blobs in gs://{bucket_name}/{prefix}")
-                blobs = list(bucket.list_blobs(prefix=prefix))
-
-                # Filter out potential directory placeholders if necessary
-                image_blobs = [b for b in blobs if b.name.lower().endswith(".png") and b.size > 0]
-
-                if not image_blobs:
-                    print(f"PROD MODE: No GCS visualization blobs found with prefix: {prefix}")
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"No production visualizations found in GCS for session: {session_id}"
-                    )
-
-                # Sort by name to get the most recent (assuming timestamp in filename)
-                latest_blob = sorted(image_blobs, key=lambda b: b.name, reverse=True)[0]
-                print(f"PROD MODE: Found latest GCS blob: {latest_blob.name}")
-
-                # Generate the public URL (consider signed URLs for private buckets)
-                # Ensure bucket/objects are publicly readable or use signed URLs
-                url = f"https://storage.googleapis.com/{bucket_name}/{latest_blob.name}"
-                print(f"PROD MODE: Redirecting to GCS URL: {url}")
-
-                # Redirect to the image
-                return RedirectResponse(url=url)
-
-            except Exception as gcs_error:
-                logging.error(f"PROD MODE: GCS error for prefix gs://{bucket_name}/{prefix}: {str(gcs_error)}")
-                raise HTTPException(
-                    status_code=500, # Use 500 for GCS errors
-                    detail=f"Error accessing visualization storage for session: {session_id}."
-                )
-
-    except HTTPException as http_exc:
-        # Log and re-raise specific HTTP exceptions
-        logging.error(f"HTTP exception for session {session_id}: {http_exc.status_code} - {http_exc.detail}")
-        raise http_exc
-    except Exception as e:
-        # Catch any other unexpected errors
-        logging.error(f"Unexpected error retrieving visualization for session {session_id}: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Cache stats error: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Internal server error while retrieving visualization."
+            detail=f"Failed to get cache stats: {str(e)}"
         )
 
-@router.get("/api/health_check")
-async def health_check():
-    return {"status": "healthy"}
-        
-@router.websocket("/api/maze-solver") # we don't need to pass in session_id here because it's passed along with the data
-async def websocket_endpoint(websocket: WebSocket):
-    print("WebSocket connection request received")
-    print(f"Client host: {websocket.client.host}")
-    print(f"Client port: {websocket.client.port}")
-    print(f"Headers: {websocket.headers}")
-    print(f"URL: {websocket.url}")
-    print(f"Query params: {websocket.query_params}")
-    print(f"Path params: {websocket.path_params}")
-    print(f"Client: {websocket.client}")
-    
-    try:
-        await websocket.accept()
-        print("WebSocket connection accepted")
-        
-        # Get and parse the data
-        raw_data = await websocket.receive_text()
-        print(f"Received data: {raw_data[:100]}...")  # Print first 100 chars
-        
-        try:
-            data = json.loads(raw_data)
-        except json.JSONDecodeError as e:
-            print(f"JSON parsing error: {str(e)}")
-            await websocket.send_json({
-                "type": "internal_error",
-                "error": f"Invalid JSON format: {str(e)}"
-            })
-            return
-        
-        # Handle test messages
-        if isinstance(data, dict) and data.get('type') == 'test':
-            print(f"Received test message: {data.get('message')}")
-            await websocket.send_json({
-                "type": "test_response",
-                "message": "Test message received successfully"
-            })
-            return
-        
-        # Extract session_id if provided
-        session_id = None
-        if isinstance(data, dict) and 'session_id' in data:
-            session_id = data['session_id']
-            print(f"Using session_id from client: {session_id}")
-        else:
-            # Generate a new session ID
-            session_id = f"session_{int(time.time())}_{random.randint(1000, 9999)}"
-            print(f"Session_id not found!! Generated new session_id: {session_id}")
-            # Add it to the data
-            if isinstance(data, dict):
-                data['session_id'] = session_id
-        
-        # Log the dimensions if present
-        if 'dimensions' in data:
-            print(f"Received maze dimensions: {data['dimensions']}")
-        
-        # Get solver instance from app state
-        solver = app.state.maze_solver
-        
-        # Send acknowledgment that processing is starting
-        await websocket.send_json({
-            "type": "processing_started",
-            "session_id": session_id,
-            "timestamp": datetime.datetime.now().isoformat()
-        })
-        
-        # Process the maze directly instead of queueing
-        # This ensures we can handle the WebSocket connection throughout
-        # the entire process and respond with all required messages
-        print(f"Starting direct maze processing for session: {session_id}")
-        await solver._solve_maze_internal(data, websocket, f"direct_{session_id}")
-        
-        # Keep connection open for a moment to ensure all messages are sent
-        # This is important for the visualization_ready message which is sent asynchronously
-        print("Maze processing completed, keeping connection open for final messages")
-        await asyncio.sleep(2)
-        
-    except WebSocketDisconnect:
-        # Client disconnected, cancel any running tasks for this websocket
-        print("WebSocket disconnecting")
-        await asyncio.sleep(2)
-        await app.state.maze_solver.cancel_tasks_for_websocket(websocket)
-    except Exception as e:
-        print(f"Error details: {type(e)}: {str(e)}")
-        await asyncio.sleep(2)
-        try:
-            await websocket.send_json({
-                "type": "internal_error",
-                "error": f"An unexpected error occurred: {str(e)}"
-            })
-        except:
-            print(f"Could not send error message: {str(e)}")
-    finally:
-        try:
-            print(f"Closing WebSocket connection for session: {session_id}")
-            await asyncio.sleep(2)
-            await app.state.maze_solver.cancel_tasks_for_websocket(websocket)
-            await websocket.close()
-        except:
-            pass
-        
+
+@router.post("/api/maze-solver", response_model=MazeSolveResponse)
 @router.post("/api/rest/maze-solver", response_model=MazeSolveResponse)
-async def http_solve_maze(request_data: MazeSolveRequest):
+async def solve_maze(request: MazeSolveRequest):
     """
-    REST endpoint for solving maze components.
-    Receives components and dimensions, returns session_id and solution paths.
+    Solve a maze with the DFS algorithm.
+    Optionally caches the solution if Redis is available.
     """
-    print(f"Received REST solve request. Session: {request_data.session_id}")
-    solver = app.state.maze_solver
     try:
-        # Prepare data in the format expected by solve_maze
-        # Pydantic automatically converts the request body JSON to the MazeSolveRequest object
-        solver_data = request_data.dict() 
+        # Generate session ID if not provided
+        if not request.session_id:
+            request.session_id = f"solve_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
         
-        # Call the solver directly (no websocket, direct=True implies sync processing)
-        # The solver._solve_maze_implementation should now return the dict {session_id, data}
-        result = await solver.solve_maze(solver_data, websocket=None, direct=True)
-
-        # FastAPI will automatically use the response_model (MazeSolveResponse)
-        # to validate and serialize the 'result' dictionary into the JSON response.
-        print(f"REST solve successful for session: {result.get('session_id')}")
-        return result
+        # Solve the maze
+        solver_data = request.dict()
+        result = await app.state.maze_solver.solve_maze(
+            solver_data,
+            websocket=None,
+            direct=True
+        )
+        
+        # Try to cache if Redis is available
+        if app.state.maze_cache and app.state.cache:
+            try:
+                request_info = {
+                    "device_fingerprint": getattr(request, 'device_fingerprint', 'default'),
+                    "ip": "solver",
+                    "user_agent": "",
+                    "accept_language": "",
+                }
+                
+                await app.state.maze_cache.cache_maze(
+                    session_id=request.session_id,
+                    maze_data=solver_data,
+                    solutions=result.get("data", []),
+                    request_info=request_info
+                )
+                logger.info(f"Cached solution for session {request.session_id}")
+            except Exception as e:
+                # Caching failure shouldn't break the response
+                logger.warning(f"Failed to cache solution: {e}")
+        
+        return MazeSolveResponse(
+            session_id=request.session_id,
+            data=result.get("data", [])
+        )
+        
     except Exception as e:
-        # Handle potential errors from the solver
-        print(f"Error during REST solve: {e}")
-        import traceback
-        traceback.print_exc()
-        # Re-raise as HTTPException for FastAPI to handle
-        raise HTTPException(status_code=500, detail=f"Maze solving failed: {str(e)}")
-
-# -----------------------------------------------------------------------------
-# Visualization generation trigger (HTTPS). Client calls this after receiving
-# solution to request that the backend generate & upload the visualization. The
-# backend responds with JSON containing status and optional URL.
-# -----------------------------------------------------------------------------
-
-@router.get("/api/visualize/generate/{session_id}")
-async def generate_visualization(session_id: str):
-    """Generate visualization for a previously solved session.
-
-    The solver must have cached the session data & solutions. Returns JSON with
-    the same structure produced by _generate_component_report_for_rest.
-    """
-    
-    async with get_redis_cache() as cache:
-        cached = await cache.get_maze_solution(session_id)
-        if not cached:
-            raise HTTPException(status_code=404, detail=f"Session '{session_id}' not in cache (expired or wrong instance).")
-        data, solutions = cached
-    try:
-        print(f"Triggering visualization generation for session: {session_id}")
-        viz_info = await solver._generate_component_report_for_rest(data, solutions)  # type: ignore[arg-type]
-        
-        # --- NEW: Check status from generation report ---
-        if viz_info.get("status") != "success":
-             error_detail = viz_info.get("error", "Unknown visualization generation issue")
-             status_code = 500 # Default to 500 for failures
-             if viz_info.get("status") == "no_components":
-                 status_code = 400 # Bad request - nothing to visualize
-                 error_detail = "No components with solutions found to visualize for this session."
-             elif viz_info.get("status") == "no_dimensions":
-                 status_code = 400
-                 error_detail = "Maze dimensions were not available for visualization."
-             elif viz_info.get("status") == "upload_error":
-                 status_code = 503 # Service unavailable (GCS issue)
-             
-             # Log the specific error before raising generic HTTP exception
-             logging.error(f"Visualization failed for session {session_id}. Status: {viz_info.get('status')}, Detail: {error_detail}")
-             
-             # Raise HTTPException with more specific detail from viz_info
-             raise HTTPException(
-                 status_code=status_code, 
-                 detail=f"Visualization failed: {error_detail}"
-             )
-        # --- END NEW ---
-            
-        print(f"Visualization generation successful for session: {session_id}. URL: {viz_info.get('url')}")
-        return viz_info # Return the full success metadata {status: 'success', url: ..., ...}
-        
-    except HTTPException as http_exc:
-         # Re-raise HTTPExceptions directly (like the 404 or the ones we just created)
-         raise http_exc
-    except Exception as e:
-        # Catch any other unexpected errors during the process
-        logging.error(f"Unexpected error during visualization generation for session {session_id}: {e}", exc_info=True) # Log stack trace
+        logger.error(f"Maze solving error: {e}")
         raise HTTPException(
-            status_code=500, 
-            # Provide more context in the 500 error
-            detail=f"Internal server error during visualization generation: {str(e)}" 
+            status_code=500,
+            detail=f"Maze solving failed: {str(e)}"
         )
 
+
+@router.websocket("/api/websocket/maze-solver")
+async def websocket_maze_solver(websocket: WebSocket):
+    """WebSocket endpoint for real-time maze solving"""
+    await websocket.accept()
+    logger.info(f"WebSocket connection established")
+
+    try:
+        while True:
+            # Receive maze data
+            data = await websocket.receive_json()
+
+            # Generate session ID
+            session_id = data.get('session_id', f"ws_{int(time.time() * 1000)}")
+
+            # Solve maze with WebSocket for real-time updates
+            await app.state.maze_solver.solve_maze(
+                data,
+                websocket=websocket,
+                direct=False
+            )
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        await websocket.send_json({"error": str(e)})
+        await websocket.close()
+
+
+@router.websocket("/api/maze-solver-simple")
+async def simple_maze_provider(websocket: WebSocket):
+    """
+    Simple WebSocket endpoint that generates and solves mazes without Redis caching.
+    Used for testing and development.
+    """
+    await websocket.accept()
+    logger.info("Simple maze provider WebSocket connection established")
+
+    try:
+        while True:
+            # Receive request
+            request = await websocket.receive_json()
+            logger.info(f"Received request: {request}")
+
+            # Extract dimensions
+            canvas_width = request.get('canvas_width', 800)
+            canvas_height = request.get('canvas_height', 600)
+            session_id = request.get('session_id', str(uuid.uuid4()))
+
+            # Send processing started
+            await websocket.send_json({
+                "type": "processing_started",
+                "session_id": session_id,
+                "message": "Generating maze and solving..."
+            })
+
+            # Create simple test maze data
+            test_maze_data = {
+                'components': [
+                    # Simple 4-node component
+                    {
+                        '1': ['2', '3'],
+                        '2': ['1', '4'],
+                        '3': ['1', '4'],
+                        '4': ['2', '3']
+                    }
+                ],
+                'dimensions': {'rows': max(10, canvas_height // 50), 'cols': max(10, canvas_width // 50)}
+            }
+
+            # Initialize solver
+            solver = MazeSolver()
+
+            # Solve the maze
+            try:
+                result = await solver.solve_maze(test_maze_data, direct=True)
+
+                if result and result.get("type") == "solution":
+                    # Send solution
+                    await websocket.send_json({
+                        "type": "solution",
+                        "session_id": session_id,
+                        "maze_data": test_maze_data,
+                        "solution_paths": result.get("data", []),
+                        "message": f"Found {len(result.get('data', []))} solution paths"
+                    })
+                else:
+                    await websocket.send_json({
+                        "type": "error",
+                        "session_id": session_id,
+                        "message": "Failed to solve maze"
+                    })
+
+            except Exception as e:
+                logger.error(f"Maze solving error: {e}")
+                await websocket.send_json({
+                    "type": "error",
+                    "session_id": session_id,
+                    "message": f"Solver error: {str(e)}"
+                })
+
+    except Exception as e:
+        logger.error(f"Simple WebSocket error: {e}")
+        await websocket.close()
+        while True:
+            # Receive maze request
+            request = await websocket.receive_json()
+            logger.info(f"Received maze request: {request.get('type', 'unknown')}")
+
+            if request.get("type") == "get_maze":
+                session_id = request.get('session_id', str(uuid.uuid4()))
+
+                # Check Redis cache using existing system (device fingerprinting + canvas size)
+                cached_maze = None
+                if app.state.maze_cache:
+                    try:
+                        # Create request info for existing cache system
+                        request_info = {
+                            "device_fingerprint": request.get("device_fingerprint", "unknown"),
+                            "ip": "stateless_ws",
+                            "user_agent": request.get("user_agent", ""),
+                            "accept_language": request.get("accept_language", ""),
+                        }
+
+                        # Use existing cache lookup logic - find compatible mazes
+                        compatible_mazes = await app.state.maze_cache.find_compatible_mazes(
+                            target_width=request.get("canvas_width", 1024),
+                            target_height=request.get("canvas_height", 768),
+                            request_info=request_info,
+                            max_results=1  # Just need one compatible maze
+                        )
+
+                        if compatible_mazes:
+                            # Get the best matching maze (first result)
+                            maze_data, solutions = compatible_mazes[0]
+                            cached_data = {
+                                "maze_data": maze_data,
+                                "solution_data": solutions,
+                                "solutions": solutions  # Backup key
+                            }
+                        else:
+                            cached_data = None
+
+                        if cached_data:
+                            cached_maze = cached_data
+                            logger.info(f"Cache hit for session {session_id}")
+
+                    except Exception as e:
+                        logger.warning(f"Cache lookup failed: {e}, generating new maze")
+
+                if cached_maze:
+                    # Return cached maze + solution
+                    await websocket.send_json({
+                        "type": "maze_ready",
+                        "session_id": session_id,
+                        "maze_data": cached_maze.get("maze_data"),
+                        "solution_data": cached_maze.get("solution_data", cached_maze.get("solutions")),
+                        "cache_hit": True
+                    })
+
+                else:
+                    # Generate new maze + solution using existing solver
+                    try:
+                        logger.info(f"Generating new maze for session {session_id}")
+
+                        # Create maze request in expected format
+                        maze_request = {
+                            "canvas_width": request.get("canvas_width", 1024),
+                            "canvas_height": request.get("canvas_height", 768),
+                            "complexity": request.get("complexity", 0.7),
+                            "session_id": session_id,
+                            "device_fingerprint": request.get("device_fingerprint", "unknown")
+                        }
+
+                        # Use existing streamlined generation (bypasses WebSocket queue)
+                        result = await app.state.maze_solver.solve_maze(
+                            maze_request,
+                            websocket=None,
+                            direct=True
+                        )
+
+                        if result and result.get("type") == "solution":
+                            # Cache the new result using existing system
+                            if app.state.maze_cache:
+                                try:
+                                    request_info = {
+                                        "device_fingerprint": request.get("device_fingerprint", "unknown"),
+                                        "ip": "stateless_ws",
+                                        "user_agent": request.get("user_agent", ""),
+                                        "accept_language": request.get("accept_language", ""),
+                                    }
+
+                                    await app.state.maze_cache.cache_maze(
+                                        session_id=session_id,
+                                        maze_data=result.get("maze_data"),
+                                        solutions=result.get("data"),
+                                        request_info=request_info
+                                    )
+
+                                except Exception as e:
+                                    logger.warning(f"Failed to cache new maze: {e}")
+
+                            # Return new maze + solution
+                            await websocket.send_json({
+                                "type": "maze_ready",
+                                "session_id": session_id,
+                                "maze_data": result.get("maze_data"),
+                                "solution_data": result.get("data"),
+                                "cache_hit": False
+                            })
+                        else:
+                            # Generation failed
+                            await websocket.send_json({
+                                "type": "error",
+                                "message": "Failed to generate maze and solution"
+                            })
+
+                    except Exception as e:
+                        logger.error(f"Maze generation error: {e}")
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"Maze generation failed: {str(e)}"
+                        })
+            else:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"Unknown request type: {request.get('type')}"
+                })
+
+    except WebSocketDisconnect:
+        logger.info("Stateless maze provider WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"Stateless WebSocket error: {e}")
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": str(e)
+            })
+        except:
+            pass  # Connection might be closed
+        finally:
+            try:
+                await websocket.close()
+            except:
+                pass
+
+
+@router.post("/api/streamlined", response_model=StreamlinedResponse)
+async def streamlined_maze_generation(request: StreamlinedRequest):
+    """
+    Streamlined endpoint: generates maze and sends to GPU renderer.
+    This is the main endpoint for the full maze generation pipeline.
+    """
+    session_id = f"streamlined_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    
+    try:
+        # Step 1: Generate maze using TypeScript generator
+        logger.info(f"Generating maze for canvas {request.canvas_width}x{request.canvas_height}")
+        
+        # Path to TypeScript maze generator
+        script_dir = Path(__file__).parent / "backend" / "maze_generator"
+        ts_script = script_dir / "generateMaze.ts"
+        
+        if not ts_script.exists():
+            raise HTTPException(
+                status_code=500,
+                detail="Maze generator script not found"
+            )
+        
+        # Execute TypeScript maze generator
+        cmd = [
+            "node", "-r", "ts-node/register",
+            str(ts_script),
+            str(request.canvas_width),
+            str(request.canvas_height)
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            cwd=str(script_dir),
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Maze generation failed: {result.stderr}"
+            )
+        
+        # Parse maze data
+        maze_data = json.loads(result.stdout.strip())
+        
+        # Step 2: Solve the maze
+        # Convert to solver format
+        components = []  # Convert maze_data to components format
+        solver_data = {
+            "components": components,
+            "dimensions": maze_data["dimensions"],
+            "session_id": session_id,
+            "device_fingerprint": request.device_fingerprint,
+        }
+        
+        solve_result = await app.state.maze_solver.solve_maze(
+            solver_data,
+            websocket=None,
+            direct=True
+        )
+        
+        # Step 3: Cache if available
+        if app.state.cache:
+            try:
+                cache_data = {
+                    "maze_data": maze_data,
+                    "solution": solve_result,
+                    "canvas_size": {
+                        "width": request.canvas_width,
+                        "height": request.canvas_height
+                    },
+                    "timestamp": int(time.time())
+                }
+                
+                await app.state.cache.set(
+                    f"maze:{session_id}",
+                    cache_data,
+                    ttl=3600
+                )
+            except Exception as e:
+                logger.warning(f"Failed to cache maze: {e}")
+        
+        # Step 4: Send to GPU renderer
+        gpu_request = {
+            "session_id": session_id,
+            "maze_data": maze_data,
+            "solutions": solve_result.get("data", []),
+            "width": request.canvas_width,
+            "height": request.canvas_height,
+        }
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            gpu_response = await client.post(
+                f"{settings.GPU_RENDERER_URL}/render",
+                json=gpu_request
+            )
+            
+            if gpu_response.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail="GPU renderer service error"
+                )
+            
+            gpu_result = gpu_response.json()
+        
+        return StreamlinedResponse(
+            session_id=session_id,
+            status="queued",
+            message="Maze generated and sent to GPU renderer",
+            render_task_id=gpu_result.get("task_id"),
+            stream_url=gpu_result.get("stream_url"),
+            status_url=f"{settings.GPU_RENDERER_URL}/status/{gpu_result.get('task_id')}",
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Streamlined generation error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Maze generation failed"
+        )
+
+
+# Include router
 app.include_router(router)
 
-# Create a single solver instance as application state
-app.state.maze_solver = MazeSolver()
+
+# ========== ERROR HANDLERS ==========
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    """Custom HTTP exception handler"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail,
+            "status_code": exc.status_code,
+            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "path": request.url.path,
+        }
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    """Catch-all exception handler"""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "status_code": 500,
+            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "path": request.url.path,
+        }
+    )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8080,
+        reload=False,
+        log_level="info",
+    )

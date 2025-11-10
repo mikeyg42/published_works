@@ -1,9 +1,12 @@
 export const environment = {
   production: false,
-  websocketUrl: 'wss://127.0.0.1:8000/api/maze-solver',
-  visualizeUrl: (sessionId: string) => `wss://127.0.0.1:8000/api/visualize/${sessionId}`,
-  //websocketUrl: 'wss://maze-solver-backend-acn3zn6u4a-uc.a.run.app/maze-solver'
-  restUrl: `https://127.0.0.1:8000/api/rest/maze-solver`,
+  websocketUrl: '',  // Not used - Cloud Run backend only supports REST
+  visualizeUrl: (sessionId: string) => ``,  // Not used - Cloud Run backend only supports REST
+  restUrl: `https://maze-solver-backend-349144859836.us-central1.run.app/api/rest/maze-solver`,
 
-  preferWebsocket: true
+  // GPU Renderer Cloud Run API
+  gpuRendererUrl: 'https://gpu-maze-renderer-349144859836.us-central1.run.app',
+
+  preferWebsocket: false,  // Cloud Run backend only supports REST API
+  useGpuRenderer: true   // Set to true to use GPU renderer instead of backend
 };

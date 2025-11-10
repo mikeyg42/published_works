@@ -28,6 +28,7 @@ node_modules/
 
 # Build outputs
 dist/
+/dist/*
 
 # WebGPU training resources (PDFs and documentation)
 webgpu_resources/

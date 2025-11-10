@@ -1,0 +1,30 @@
+# .cargo/config.toml
+
+[build]
+# Use all CPU cores for compilation
+jobs = 16
+
+[target.x86_64-unknown-linux-gnu]
+# T4 VM optimizations
+rustflags = [
+    "-C", "target-cpu=haswell",     # T4 GPU nodes typically have Haswell+ CPUs
+    "-C", "target-feature=+avx2",   # Enable AVX2 for SIMD
+    "-C", "link-arg=-fuse-ld=lld",  # Faster linker if available
+]
+
+[profile.release]
+# Additional rustc optimizations
+rustflags = [
+    "-C", "inline-threshold=275",   # More aggressive inlining
+    "-C", "llvm-args=-unroll-threshold=1000", # More loop unrolling
+]
+
+[env]
+# Force color output for better readability
+CARGO_TERM_COLOR = "always"
+
+# Set rust backtrace for debugging
+RUST_BACKTRACE = "1"
+
+# Optimize wgpu for Vulkan
+WGPU_BACKEND = "vulkan"
