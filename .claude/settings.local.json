@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(git commit:*)",
+      "Bash(git add:*)",
+      "Bash(cargo check:*)",
+      "WebSearch",
+      "Bash(source:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo clean:*)",
+      "Bash(cargo:*)",
+      "Bash(PROJECT_ID=\"resume-page-430800\" REGION=\"us-central1\" SERVICE_NAME=\"gpu-maze-renderer\" bash -c '\necho \"\"🚀 Deploying to Cloud Run with GPU support (no zonal redundancy)...\"\"\ngcloud run services replace cloud-run-gpu-ready.yaml \\\n    --region=${REGION} \\\n    --platform=managed \\\n    --project=${PROJECT_ID} \\\n    --no-gpu-zonal-redundancy\n')",
+      "Bash(rm:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
