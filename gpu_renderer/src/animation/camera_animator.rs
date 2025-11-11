@@ -202,7 +202,7 @@ impl CameraAnimator {
             .with_easing(Easing::CubicInOut);
         
         // Create completion future
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
         let completion_sent = Arc::new(std::sync::Mutex::new(false));
         let completion_sent_clone = completion_sent.clone();
         

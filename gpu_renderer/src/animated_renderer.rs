@@ -10,7 +10,7 @@ use crate::animation::{
     AnimationOrchestrator, LightingAnimator, CameraAnimator, PathAnimator,
     AnimationState, Vec3, OrchestratorBuilder, MazeSolution, PathData, PathPoint,
 };
-use crate::{Args, MazeData, PathTracer, Uniforms};
+use crate::{Args, MazeCell, MazeData, PathTracer, Uniforms};
 
 /// Enhanced path tracer with integrated animation systems
 /// This extends the basic PathTracer with dynamic lighting, camera animation, and path sequencing
@@ -181,8 +181,9 @@ impl AnimatedPathTracer {
     pub fn create_solution_from_maze(&self, maze: &MazeData) -> Vec<PathData> {
         if let Some(ref solution_ids) = maze.solution {
             // Filter cells that are part of the solution
-            let solution_cells: Vec<_> = maze.cells.iter()
+            let solution_cells: Vec<MazeCell> = maze.cells.iter()
                 .filter(|cell| solution_ids.contains(&cell.id))
+                .cloned()
                 .collect();
 
             // Convert to path points
@@ -310,9 +311,10 @@ impl AnimatedPathTracer {
                             if let serde_json::Value::String(cell_id) = point {
                                 // Convert cell ID to path point (simplified)
                                 let path_point = PathPoint {
-                                    cell_id: cell_id.clone(),
+                                    id: cell_id.clone(),
                                     position: Vec3::new(0.0, 0.0, 0.0), // Would be calculated from maze
-                                    elevation: 0.0,
+                                    is_elevated: false,
+                                    elevation_height: 0.0,
                                 };
                                 path_points.push(path_point);
                             }

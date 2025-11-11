@@ -288,25 +288,25 @@ impl<T: Interpolate> Tween<T> {
     }
     
     /// Set easing function
-    pub fn with_easing(mut self, easing: Easing) -> Self {
+    pub fn with_easing(&mut self, easing: Easing) -> &mut Self {
         self.easing = easing;
         self
     }
-    
+
     /// Set initial delay
-    pub fn with_delay(mut self, delay: Duration) -> Self {
+    pub fn with_delay(&mut self, delay: Duration) -> &mut Self {
         self.delay = delay;
         self
     }
-    
+
     /// Set repeat count (u32::MAX for infinite)
-    pub fn with_repeat(mut self, count: u32) -> Self {
+    pub fn with_repeat(&mut self, count: u32) -> &mut Self {
         self.repeat = count;
         self
     }
-    
+
     /// Enable yoyo mode (reverse on repeat)
-    pub fn with_yoyo(mut self, yoyo: bool) -> Self {
+    pub fn with_yoyo(&mut self, yoyo: bool) -> &mut Self {
         self.yoyo = yoyo;
         self
     }
@@ -516,6 +516,7 @@ impl TweenGroup {
         // Handle completed tweens
         for id in completed {
             self.tweens_f32.remove(&id);
+            self.update_callbacks.remove(&id);  // Fix memory leak: remove update callback
             if let Some(callback) = self.complete_callbacks.remove(&id) {
                 callback();
             }
@@ -536,6 +537,7 @@ impl TweenGroup {
         
         for id in completed {
             self.tweens_vec3.remove(&id);
+            self.update_callbacks.remove(&id);  // Fix memory leak: remove update callback
             if let Some(callback) = self.complete_callbacks.remove(&id) {
                 callback();
             }
@@ -556,6 +558,7 @@ impl TweenGroup {
         
         for id in completed {
             self.tweens_color.remove(&id);
+            self.update_callbacks.remove(&id);  // Fix memory leak: remove update callback
             if let Some(callback) = self.complete_callbacks.remove(&id) {
                 callback();
             }

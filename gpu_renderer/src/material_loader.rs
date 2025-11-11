@@ -14,7 +14,7 @@ use wgpu::util::DeviceExt;
 pub struct PbrTexture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
-    pub sampler: wgpu::Sampler,
+    pub sampler: Arc<wgpu::Sampler>,
     pub dimensions: (u32, u32),
 }
 
@@ -97,14 +97,14 @@ pub struct MaterialRegistry {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     materials: HashMap<String, TextureSet>,
-    default_sampler: wgpu::Sampler,
+    default_sampler: Arc<wgpu::Sampler>,
 }
 
 impl MaterialRegistry {
     /// Create new material registry with WGPU device
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         // Create default sampler for PBR textures
-        let default_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let default_sampler = Arc::new(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("PBR Default Sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
@@ -117,7 +117,7 @@ impl MaterialRegistry {
             compare: None,
             anisotropy_clamp: 16, // High quality anisotropic filtering
             border_color: None,
-        });
+        }));
 
         Self {
             device,
@@ -253,7 +253,7 @@ impl MaterialRegistry {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Use shared sampler for efficiency
-        let sampler = self.default_sampler.clone();
+        let sampler = Arc::clone(&self.default_sampler);
 
         Ok(PbrTexture {
             texture,

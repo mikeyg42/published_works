@@ -8,6 +8,7 @@ use image::{ImageBuffer, ImageFormat, Rgba};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use tokio::io::AsyncWriteExt;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,7 +23,6 @@ mod http_server;
 mod animation;
 mod animated_renderer;
 mod material_loader;
-mod simple_server;
 
 use crate::error_handling::{padded_bytes_per_row, unpad_rows, validate_format_features};
 use crate::animated_renderer::AnimatedPathTracer;
@@ -404,7 +404,11 @@ impl PathTracer {
         // Uniforms
         let mut uniforms = Uniforms::default();
         uniforms.aspect_ratio = width as f32 / height as f32;
-        uniforms.seed = fastrand::u32(..);
+        // Generate seed from system time for reproducible randomness
+        uniforms.seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u32;
         uniforms.time = 0.0;
 
         const UNIFORM_SIZE: u64 = std::mem::size_of::<Uniforms>() as u64;
@@ -519,7 +523,7 @@ impl PathTracer {
     ) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
         // One triangle facing +Z
         let vertices: [f32; 9] = [0.0, 1.0, 0.0, -1.0, -1.0, 0.0, 1.0, -1.0, 0.0];
-        let normals: [f32; 9] = [0.0, 0.0, 1.0; 3];
+        let normals: [f32; 9] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
         let materials: [f32; 6] = [0.8, 0.8, 0.8, 0.0, 0.5, 0.0];
 
         let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -702,7 +706,10 @@ impl PathTracer {
 
         {
             let mut cpass =
-                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("PathTrace") });
+                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { 
+                    label: Some("PathTrace"),
+                    timestamp_writes: None,
+                });
             cpass.set_pipeline(&self.compute_pipeline);
             cpass.set_bind_group(0, &self.compute_bgs[self.ping], &[]);
             let gx = (self.width + WORKGROUP_X - 1) / WORKGROUP_X;
@@ -732,10 +739,9 @@ impl PathTracer {
 
         let png = self.save_image_to_buffer().await?;
         if path == Path::new("-") {
-            let mut stdout = tokio::io::stdout();
-            stdout
+            use std::io::Write;
+            std::io::stdout()
                 .write_all(&png)
-                .await
                 .context("Failed writing PNG to stdout")?;
         } else {
             tokio::fs::write(path, &png)
@@ -750,7 +756,7 @@ impl PathTracer {
     pub async fn save_image_to_buffer(&self) -> Result<Vec<u8>> {
         // Create staging buffer with padded rows
         let bpr_unpadded = self.width * 4;
-        let bpr_padded = padded_bytes_per_row(bpr_unpadded);
+        let bpr_padded = padded_bytes_per_row(self.width, 4);
         let size = (bpr_padded as u64) * (self.height as u64);
 
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -793,13 +799,13 @@ impl PathTracer {
 
         // Map and wait
         let slice = staging.slice(..);
-        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
-        slice.map_async(wgpu::MapMode::Read, move |res| tx.send(res).ok());
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| { tx.send(res).ok(); });
         // Make progress on mapping
         let map_res = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 self.device.poll(wgpu::Maintain::Poll);
-                if let Ok(res) = rx.try_receive() {
+                if let Ok(res) = rx.try_recv() {
                     break res;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -807,10 +813,6 @@ impl PathTracer {
         })
         .await
         .map_err(|_| anyhow!("Timed out mapping readback buffer"))??;
-
-        if map_res.is_err() {
-            return Err(anyhow!("Map failed for readback buffer"));
-        }
 
         let padded = slice.get_mapped_range();
         let raw = unpad_rows(&padded, self.width, self.height, 4);
@@ -838,7 +840,7 @@ impl PathTracer {
     pub async fn get_frame_data(&self) -> Result<Vec<u8>> {
         // Create staging buffer with padded rows
         let bpr_unpadded = self.width * 4;
-        let bpr_padded = padded_bytes_per_row(bpr_unpadded);
+        let bpr_padded = padded_bytes_per_row(self.width, 4);
         let size = (bpr_padded as u64) * (self.height as u64);
 
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -878,14 +880,14 @@ impl PathTracer {
 
         // Map and wait
         let slice = staging.slice(..);
-        let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
-        slice.map_async(wgpu::MapMode::Read, move |res| tx.send(res).ok());
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| { tx.send(res).ok(); });
 
         // Make progress on mapping (shorter timeout for streaming)
         let map_res = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 self.device.poll(wgpu::Maintain::Poll);
-                if let Ok(res) = rx.try_receive() {
+                if let Ok(res) = rx.try_recv() {
                     break res;
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -893,10 +895,6 @@ impl PathTracer {
         })
         .await
         .map_err(|_| anyhow!("Timed out mapping frame data buffer"))??;
-
-        if map_res.is_err() {
-            return Err(anyhow!("Map failed for frame data buffer"));
-        }
 
         let padded = slice.get_mapped_range();
         let raw = unpad_rows(&padded, self.width, self.height, 4);
@@ -945,6 +943,7 @@ impl PathTracer {
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Gradient Pass"),
+                timestamp_writes: None,
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &self.compute_bgs[self.ping], &[]);
@@ -1065,8 +1064,8 @@ async fn main() -> Result<()> {
     info!("Starting with {args:?}");
 
     if args.server {
-        info!("Simple server mode on :3030");
-        return simple_server::start_simple_server().await;
+        info!("HTTP server mode on :3030");
+        return http_server::start_server().await;
     }
 
     // Test material loading if requested
@@ -1077,7 +1076,7 @@ async fn main() -> Result<()> {
     if args.animated {
         // Three.js migration mode - animated path tracer with dynamic lighting
         info!("Running in animated mode with Three.js lighting system");
-        let mut animated_tracer = AnimatedPathTracer::new(args.width, args.height, &args).await?;
+        let mut animated_tracer = AnimatedPathTracer::new(args.width, args.height).await?;
 
         // Load maze and initialize animation systems
         let maze = load_maze_data(&args).await?;

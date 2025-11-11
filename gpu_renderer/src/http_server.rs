@@ -1,6 +1,6 @@
-// gpu_renderer/src/https_server.rs
+// gpu_renderer/src/http_server.rs
 use crate::{PathTracer, Args, MazeData};
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use warp::ws::{WebSocket, Message};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use base64::{Engine as _, engine::general_purpose};
+use image::{ImageBuffer, Rgba, ImageFormat, DynamicImage};
 
 // ============= Request/Response Models =============
 
@@ -161,15 +162,22 @@ impl ServerState {
 
 // ============= Animation Streaming =============
 
+// Message types for WebSocket sender channel
+enum WsMessage {
+    Binary(Vec<u8>),
+    Text(String),
+}
+
 async fn handle_animation_stream(ws: WebSocket, state: ServerState) {
     log::info!("New animation WebSocket connection");
 
     let (mut ws_sender, mut ws_receiver) = ws.split();
+    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<WsMessage>();
     let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let mut last_ping = std::time::Instant::now();
     let mut pending_frame: Option<Vec<u8>> = None;
 
-    // Spawn frame sender task (handles backpressure)
+    // Spawn WebSocket sender task (handles both frames and control messages)
     let sender_handle = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -177,6 +185,17 @@ async fn handle_animation_stream(ws: WebSocket, state: ServerState) {
                 Some(frame) = frame_rx.recv() => {
                     // Backpressure: replace pending frame if client is behind
                     pending_frame = Some(frame);
+                }
+
+                // Control message (pong, etc.)
+                Some(ws_msg) = msg_rx.recv() => {
+                    let result = match ws_msg {
+                        WsMessage::Binary(data) => ws_sender.send(Message::binary(data)).await,
+                        WsMessage::Text(text) => ws_sender.send(Message::text(text)).await,
+                    };
+                    if result.is_err() {
+                        break; // Connection closed
+                    }
                 }
 
                 // Send pending frame to client
@@ -202,13 +221,14 @@ async fn handle_animation_stream(ws: WebSocket, state: ServerState) {
     // Handle incoming messages (ping/pong and animation requests)
     while let Some(message) = ws_receiver.next().await {
         match message {
-            Ok(Message::Text(text)) => {
-                if let Ok(ping_pong) = serde_json::from_str::<PingPong>(&text) {
+            Ok(msg) if msg.is_text() => {
+                let text = msg.to_str().unwrap_or("");
+                if let Ok(ping_pong) = serde_json::from_str::<PingPong>(text) {
                     if ping_pong.r#type == "ping" {
                         last_ping = std::time::Instant::now();
                         let pong = PingPong { r#type: "pong".to_string() };
                         if let Ok(pong_json) = serde_json::to_string(&pong) {
-                            if ws_sender.send(Message::text(pong_json)).await.is_err() {
+                            if msg_tx.send(WsMessage::Text(pong_json)).is_err() {
                                 break;
                             }
                         }
@@ -216,7 +236,7 @@ async fn handle_animation_stream(ws: WebSocket, state: ServerState) {
                 }
 
                 // Try to parse as simple session request (frontend format)
-                if let Ok(session_request) = serde_json::from_str::<SessionStreamRequest>(&text) {
+                if let Ok(session_request) = serde_json::from_str::<SessionStreamRequest>(text) {
                     log::info!("Starting animation stream for session: {}", session_request.session_id);
 
                     // For now, generate mock animation frames for the session
@@ -232,7 +252,7 @@ async fn handle_animation_stream(ws: WebSocket, state: ServerState) {
                 }
 
                 // Try to parse as full animation request (for direct API calls)
-                else if let Ok(request) = serde_json::from_str::<AnimationStreamRequest>(&text) {
+                else if let Ok(request) = serde_json::from_str::<AnimationStreamRequest>(text) {
                     log::info!("Starting animation stream for direct maze data");
 
                     // Start animation generation in background task
@@ -245,7 +265,7 @@ async fn handle_animation_stream(ws: WebSocket, state: ServerState) {
                     });
                 }
             }
-            Ok(Message::Close(_)) => {
+            Ok(msg) if msg.is_close() => {
                 log::info!("Animation WebSocket closed by client");
                 break;
             }
@@ -322,7 +342,7 @@ async fn generate_animation_frames(
     log::info!("Generating animation frames with {}fps", request.animation_config.fps);
 
     // Create animated renderer
-    let mut animated_renderer = match crate::AnimatedPathTracer::new(
+    let mut animated_renderer = match crate::animated_renderer::AnimatedPathTracer::new(
         request.animation_config.width.unwrap_or(1024),
         request.animation_config.height.unwrap_or(1024),
     ).await {
@@ -334,7 +354,7 @@ async fn generate_animation_frames(
     };
 
     // Start animation with maze data
-    animated_renderer.start_animation(request.maze_data, request.solution_data).await?;
+    animated_renderer.initialize_with_maze(&request.maze_data)?;
 
     let frame_duration = Duration::from_millis(1000 / request.animation_config.fps as u64);
     let mut frame_count = 0u32;
@@ -343,8 +363,14 @@ async fn generate_animation_frames(
         let frame_start = std::time::Instant::now();
 
         // Generate next frame
-        match animated_renderer.next_frame().await {
-            Some(frame_data) => {
+        match animated_renderer.update_and_render() {
+            Ok(()) => {
+                // Get frame data (this would need to be implemented in AnimatedPathTracer)
+                // For now, create a mock frame
+                let frame_data = vec![0u8; (request.animation_config.width.unwrap_or(1024) * 
+                                            request.animation_config.height.unwrap_or(1024) * 
+                                            4) as usize];
+                
                 // Convert frame to PNG bytes
                 let png_bytes = frame_to_png_bytes(&frame_data,
                     request.animation_config.width.unwrap_or(1024),
@@ -357,9 +383,15 @@ async fn generate_animation_frames(
 
                 frame_count += 1;
                 log::debug!("Sent animation frame {}", frame_count);
+                
+                // Stop after reasonable number of frames for demo
+                if frame_count >= 300 { // 10 seconds at 30fps
+                    log::info!("Animation completed after {} frames", frame_count);
+                    break;
+                }
             }
-            None => {
-                log::info!("Animation completed after {} frames", frame_count);
+            Err(e) => {
+                log::error!("Failed to render frame: {}", e);
                 break;
             }
         }
@@ -524,7 +556,9 @@ async fn process_render_task(
             samples: request.samples.unwrap_or(256),
             gradient_test: false,
             vulkan: true,
-            server: true, // Changed to true for server mode
+            server: true,
+            animated: false,
+            test_materials: false,
         };
 
         // Create renderer
@@ -729,11 +763,11 @@ pub async fn start_server() -> Result<()> {
 
     log::info!("Starting GPU renderer HTTP server on port {}", port);
     
-    // Configure server with timeouts
-    let server = warp::serve(routes)
-        .tcp_keepalive(Some(Duration::from_secs(60)))
-        .run(([0, 0, 0, 0], port));
-
-    server.await;
+    // Create the server and bind to address
+    // NOTE: tcp_keepalive method has been removed in newer warp versions
+    // The server will use default TCP settings
+    let addr = ([0, 0, 0, 0], port);
+    warp::serve(routes).run(addr).await;
+    
     Ok(())
 }

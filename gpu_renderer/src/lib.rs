@@ -4,7 +4,9 @@
 pub mod material_loader;
 pub mod animation;
 pub mod error_handling;
+pub mod types;
 
 // Re-export commonly used types
 pub use material_loader::{MaterialRegistry, TextureSet, MaterialParams, TextureFileNames, PbrTexture};
-pub use animation::{AnimationState, Vec3 as AnimVec3, TweenEngine, EasingFunction};
+pub use animation::{AnimationState, Vec3 as AnimVec3, TweenGroup, Easing};
+pub use types::{MazeCell, MazeData, Point3, MazeDimensions};

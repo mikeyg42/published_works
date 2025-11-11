@@ -131,8 +131,9 @@ impl AnimationOrchestrator {
         self.lighting_animator.stop_intro_lighting();
 
         // Transition camera to overview - matches Three.js transitionToOverview()
-        self.camera_animator.transition_to_overview().await
-            .map_err(|_| AnimationError::CallbackError)?;
+        self.camera_animator
+            .transition_to_overview(Duration::from_millis(self.transition_duration_ms))
+            .await?;
 
         // Start solving lighting
         self.lighting_animator.start_solving_lighting();
@@ -178,7 +179,9 @@ impl AnimationOrchestrator {
 
         // Wait for all component animations to complete - matches Promise.all() in Three.js
         let results: Result<Vec<_>, _> = futures::future::try_join_all(animation_futures).await;
-        results.map_err(|_| AnimationError::CallbackError)?;
+        results.map_err(|_: ()| AnimationError::CallbackError(
+            "Component validation animation failed".to_string()
+        ))?;
 
         // Transition to solved state
         self.current_state = AnimationState::Solved;
